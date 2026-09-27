@@ -109,7 +109,7 @@
 
 `wallet_journal`：角色 ID、ESI 流水 ID、UTC 时间、原始金额、余额、`ref_type`、描述、原因、关联 ID、税字段及必要的原始可选字段。`(character_id, journal_id)` 为唯一键。
 
-金额以 SQLite NUMERIC 可精确往返的十进制定点字符串写入，Python 计算使用 `Decimal`，不得使用二进制浮点数累加 ISK。
+金额列使用 SQLite `TEXT` 保存规范化的十进制定点字符串，读取后恢复为 Python `Decimal`；不得让 SQLite 的 `NUMERIC` 亲和性或 Python 二进制浮点数参与 ISK 累加。
 
 查询层按 UTC 范围过滤候选记录，再以 `Asia/Shanghai` 规则归组。数据库迁移使用应用内按版本执行的幂等建表/升级函数，不引入独立迁移服务。
 
