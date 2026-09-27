@@ -75,8 +75,18 @@ class Settings(BaseSettings):
         return True
 
     def _has_valid_callback_url(self) -> bool:
-        parsed = urlparse(self.eve_callback_url)
-        return parsed.scheme in {'http', 'https'} and bool(parsed.netloc)
+        try:
+            parsed = urlparse(self.eve_callback_url)
+            host = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            return False
+        return (
+            parsed.scheme in {'http', 'https'}
+            and host is not None
+            and not any(character.isspace() for character in host)
+            and (port is None or 1 <= port <= 65535)
+        )
 
     def _has_valid_database_path(self) -> bool:
         return self.database_path is not None

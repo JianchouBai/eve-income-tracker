@@ -70,6 +70,20 @@ def test_invalid_callback_url_prevents_esi_readiness():
     assert settings.is_esi_ready is False
 
 
+def test_callback_url_with_whitespace_in_host_prevents_esi_readiness():
+    settings = valid_settings(eve_callback_url='http://eve online.example/auth/callback')
+
+    assert 'EVE_CALLBACK_URL' in settings.configuration_issues()
+    assert settings.is_esi_ready is False
+
+
+def test_callback_url_with_out_of_range_port_prevents_esi_readiness():
+    settings = valid_settings(eve_callback_url='https://localhost:70000/auth/callback')
+
+    assert 'EVE_CALLBACK_URL' in settings.configuration_issues()
+    assert settings.is_esi_ready is False
+
+
 def test_empty_database_path_prevents_esi_readiness():
     settings = valid_settings(database_path='')
 
