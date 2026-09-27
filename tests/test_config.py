@@ -49,3 +49,43 @@ def test_is_esi_ready_with_secure_secrets_and_contact_bearing_user_agent():
     )
 
     assert settings.is_esi_ready is True
+
+
+def valid_settings(**overrides: str) -> Settings:
+    values = {
+        'eve_client_id': 'client-id',
+        'eve_client_secret': 'client-secret',
+        'app_session_secret': 's' * 32,
+        'app_encryption_key': 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=',
+        'eve_user_agent': 'eve-income-tracker/0.1 (admin@example.com)',
+    }
+    values.update(overrides)
+    return Settings(_env_file=None, **values)
+
+
+def test_invalid_callback_url_prevents_esi_readiness():
+    settings = valid_settings(eve_callback_url='not-a-url')
+
+    assert 'EVE_CALLBACK_URL' in settings.configuration_issues()
+    assert settings.is_esi_ready is False
+
+
+def test_empty_database_path_prevents_esi_readiness():
+    settings = valid_settings(database_path='')
+
+    assert 'DATABASE_PATH' in settings.configuration_issues()
+    assert settings.is_esi_ready is False
+
+
+def test_invalid_esi_compatibility_date_prevents_esi_readiness():
+    settings = valid_settings(esi_compatibility_date='2026/05/19')
+
+    assert 'ESI_COMPATIBILITY_DATE' in settings.configuration_issues()
+    assert settings.is_esi_ready is False
+
+
+def test_malformed_user_agent_contact_prevents_esi_readiness():
+    settings = valid_settings(eve_user_agent='eve-income-tracker/0.1 (a@b..c)')
+
+    assert 'EVE_USER_AGENT' in settings.configuration_issues()
+    assert settings.is_esi_ready is False
