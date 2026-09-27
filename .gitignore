@@ -1,2 +1,12 @@
 .worktrees/
+.env
+.venv/
+data/
+*.sqlite3
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 
