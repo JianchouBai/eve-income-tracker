@@ -14,8 +14,9 @@
     <section id='dashboard' {% if not authenticated %}hidden{% endif %}>
       <form id='role-filters' class='filters'><fieldset><legend>角色与日期</legend><div id='enable-region' aria-live='polite'>正在加载角色…</div><label>开始 <input id='date-from' type='date'></label><label>结束 <input id='date-to' type='date'></label><button type='submit'>更新报表</button><button id='sync-button' type='button'>同步数据</button><a id='reauthorize-link' href='{{ '/auth/login' if not configuration_issues else '#' }}'>重新授权 / 添加角色</a></fieldset></form>
       <p id='status-message' class='notice' role='status'>正在加载报表…</p>
+      <section id='sync-results' class='panel' aria-live='polite'><h2>同步状态</h2><p>尚未同步。</p></section>
       <section class='summary-grid' aria-label='汇总'><article><p>到账收入</p><strong id='summary-income'>—</strong></article><article><p>已交税费</p><strong id='summary-tax'>—</strong></article><article><p>税后收入</p><strong id='summary-net'>—</strong></article></section>
-      <section class='panel'><h2>近 30 日趋势</h2><canvas id='trend-canvas' role='img' aria-label='收入、税费和税后收入趋势图'>收入趋势图：图表不可用时请查看下方连续日表。</canvas></section>
+      <section class='panel'><h2>近 30 日趋势</h2><canvas id='trend-canvas' role='img' aria-label='收入、税费和税后收入趋势图'>收入趋势图：图表不可用时请查看下方连续日表。</canvas><p id='trend-fallback' class='chart-fallback'>图表不可用时请查看下方连续日表。</p></section>
       <section class='breakdowns'><section id='category-breakdown' class='panel'><h2>类型分项</h2><p>暂无数据</p></section><section id='character-breakdown' class='panel'><h2>角色分项</h2><p>暂无数据</p></section></section>
       <section class='panel'><h2>每日明细</h2><div class='scroll'><table id='daily-table'><thead><tr><th>北京时间日期</th><th>到账</th><th>税费</th><th>税后</th></tr></thead><tbody></tbody></table></div></section>
       <details id='entry-details' class='panel'><summary>已纳入流水明细</summary><div class='scroll'><table><thead><tr><th>日期</th><th>角色</th><th>类型</th><th>金额</th><th>说明</th></tr></thead><tbody></tbody></table></div></details>

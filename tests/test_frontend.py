@@ -36,3 +36,34 @@ def test_dashboard_shell_contains_semantic_regions_and_local_assets(tmp_path):
     assert js.headers['content-type'].startswith('text/javascript')
     assert 'https://' not in page.text
     assert 'http://' not in page.text
+
+
+def test_dashboard_script_contract_covers_enable_sync_status_decimal_details_and_canvas_fallback(tmp_path):
+    with client(tmp_path) as browser:
+        script = browser.get('/static/app.js').text
+        page = browser.get('/').text
+
+    for token in [
+        '/api/characters/${characterId}/enabled',
+        'Content-Type',
+        'JSON.stringify',
+        'X-CSRF-Token',
+        'sync-results',
+        'last_synced_at',
+        'isk(x.amount)',
+        'getContext(\'2d\')',
+        'if (!ctx)',
+        'BigInt',
+        'drawSeries',
+        'roles().then(load).catch',
+        'data.income',
+        'name',
+        'data-report-select',
+        'result.error.message',
+        'button.disabled = true',
+        'trend-fallback',
+    ]:
+        assert token in script
+    assert 'sync-results' in page
+    assert 'Number(x.net)' not in script
+    assert 'innerHTML' not in script
