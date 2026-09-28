@@ -5,12 +5,12 @@ from decimal import Decimal
 
 def _require_utc(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() != timedelta(0):
-        raise ValueError(f'{field_name} must be timezone-aware UTC')
+        raise ValueError(f"{field_name} must be timezone-aware UTC")
 
 
 def _require_decimal(value: Decimal, field_name: str) -> None:
     if not isinstance(value, Decimal) or not value.is_finite():
-        raise ValueError(f'{field_name} must be a finite Decimal')
+        raise ValueError(f"{field_name} must be a finite Decimal")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,9 +24,9 @@ class CharacterRecord:
     last_synced_at: datetime | None
 
     def __post_init__(self) -> None:
-        _require_utc(self.tracking_started_at, 'tracking_started_at')
+        _require_utc(self.tracking_started_at, "tracking_started_at")
         if self.last_synced_at is not None:
-            _require_utc(self.last_synced_at, 'last_synced_at')
+            _require_utc(self.last_synced_at, "last_synced_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +38,7 @@ class JournalEntry:
     ref_type: str
     tax: Decimal | None = None
     balance: Decimal | None = None
-    description: str = ''
+    description: str = ""
     reason: str | None = None
     context_id: int | None = None
     context_id_type: str | None = None
@@ -49,12 +49,12 @@ class JournalEntry:
     tax_receiver_id: int | None = None
 
     def __post_init__(self) -> None:
-        _require_utc(self.date_utc, 'date_utc')
-        _require_decimal(self.amount, 'amount')
+        _require_utc(self.date_utc, "date_utc")
+        _require_decimal(self.amount, "amount")
         if self.tax is not None:
-            _require_decimal(self.tax, 'tax')
+            _require_decimal(self.tax, "tax")
         if self.balance is not None:
-            _require_decimal(self.balance, 'balance')
+            _require_decimal(self.balance, "balance")
 
 
 @dataclass(frozen=True, slots=True)

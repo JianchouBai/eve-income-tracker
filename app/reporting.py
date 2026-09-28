@@ -14,22 +14,22 @@ from app.models import (
     JournalEntry,
 )
 
-BEIJING = ZoneInfo('Asia/Shanghai')
+BEIJING = ZoneInfo("Asia/Shanghai")
 UTC = timezone.utc  # noqa: UP017 - test runtime is Python 3.10.
 ZERO = Decimal(0)
 
 INCOME_CATEGORIES = {
-    'bounty_prizes': '赏金',
-    'ess_escrow_transfer': 'ESS',
-    'agent_mission_reward': '任务奖励',
-    'agent_mission_time_bonus_reward': '任务限时奖励',
+    "bounty_prizes": "赏金",
+    "ess_escrow_transfer": "ESS",
+    "agent_mission_reward": "任务奖励",
+    "agent_mission_time_bonus_reward": "任务限时奖励",
 }
 TAX_CATEGORIES = {
-    'bounty_prize_corporation_tax': '赏金',
-    'npc_bounty_security_tax': '赏金',
-    'agent_mission_reward_corporation_tax': '任务奖励',
-    'agent_mission_security_tax': '任务奖励',
-    'agent_mission_time_bonus_reward_corporation_tax': '任务限时奖励',
+    "bounty_prize_corporation_tax": "赏金",
+    "npc_bounty_security_tax": "赏金",
+    "agent_mission_reward_corporation_tax": "任务奖励",
+    "agent_mission_security_tax": "任务奖励",
+    "agent_mission_time_bonus_reward_corporation_tax": "任务限时奖励",
 }
 CATEGORY_ORDER = tuple(INCOME_CATEGORIES.values())
 
@@ -37,20 +37,20 @@ CATEGORY_ORDER = tuple(INCOME_CATEGORIES.values())
 def classify_entry(entry: JournalEntry) -> ClassifiedEntry | None:
     category = INCOME_CATEGORIES.get(entry.ref_type)
     if category is not None and entry.amount > ZERO:
-        return ClassifiedEntry(entry, 'income', category, entry.amount)
+        return ClassifiedEntry(entry, "income", category, entry.amount)
 
     category = TAX_CATEGORIES.get(entry.ref_type)
     if category is not None and entry.amount < ZERO:
-        return ClassifiedEntry(entry, 'tax', category, -entry.amount)
+        return ClassifiedEntry(entry, "tax", category, -entry.amount)
 
     return None
 
 
 def parse_date_range(start: date, end: date) -> DateRange:
     if start > end:
-        raise ValueError('start date must not be after end date')
+        raise ValueError("start date must not be after end date")
     if (end - start).days + 1 > 366:
-        raise ValueError('date range must not exceed 366 days')
+        raise ValueError("date range must not exceed 366 days")
     start_utc = datetime.combine(start, time.min, BEIJING).astimezone(UTC)
     end_utc_exclusive = datetime.combine(
         end + timedelta(days=1), time.min, BEIJING
@@ -89,7 +89,7 @@ def build_dashboard(
         if classified is None:
             continue
         day = entry.date_utc.astimezone(BEIJING).date()
-        if classified.kind == 'income':
+        if classified.kind == "income":
             daily_totals[day][0] += classified.amount
             category_totals[classified.category][0] += classified.amount
             character_totals[entry.character_id][0] += classified.amount
@@ -105,7 +105,9 @@ def build_dashboard(
     income = sum((total.income for total in daily), ZERO)
     tax = sum((total.tax for total in daily), ZERO)
     categories = tuple(
-        CategoryTotal(category, category_income, category_tax, category_income - category_tax)
+        CategoryTotal(
+            category, category_income, category_tax, category_income - category_tax
+        )
         for category, (category_income, category_tax) in category_totals.items()
     )
     character_rows = tuple(
