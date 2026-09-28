@@ -5,17 +5,20 @@
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <meta name='csrf-token' content='{{ csrf_token }}'>
   <title>EVE 每日收益</title>
+  <link rel='stylesheet' href='/static/app.css'>
 </head>
-<body>
-  <main>
-    <h1>EVE 每日收益</h1>
-    {% if configuration_issues %}
-    <p>请先配置以下环境变量：</p>
-    <ul>{% for name in configuration_issues %}<li>{{ name }}</li>{% endfor %}</ul>
-    {% else %}
-    <a href='/auth/login'>{{ '添加角色' if authenticated else '登录 EVE' }}</a>
-    {% if authenticated %}<p>角色数据已就绪。</p>{% endif %}
-    {% endif %}
-  </main>
-</body>
-</html>
+<body data-authenticated='{{ authenticated|lower }}'>
+  <main class='shell'>
+    <header class='masthead'><div><p class='eyebrow'>WALLET / ISK</p><h1>EVE 每日收益</h1><p>只读权限 <code>esi-wallet.read_character_wallet.v1</code>。按北京时间自然日统计；首次授权前的历史不会纳入。</p></div>{% if configuration_issues %}<span id='add-role-link' class='button'>完成配置后可登录</span>{% else %}<a id='add-role-link' class='button' href='/auth/login'>{{ '添加角色' if authenticated else '登录 EVE' }}</a>{% endif %}</header>
+    {% if configuration_issues %}<section class='notice error'><h2>需要配置</h2><p>请配置后再连接 EVE；本应用仅读取角色钱包流水。</p><ul>{% for name in configuration_issues %}<li>{{ name }}</li>{% endfor %}</ul></section>{% endif %}
+    <section id='dashboard' {% if not authenticated %}hidden{% endif %}>
+      <form id='role-filters' class='filters'><fieldset><legend>角色与日期</legend><div id='enable-region' aria-live='polite'>正在加载角色…</div><label>开始 <input id='date-from' type='date'></label><label>结束 <input id='date-to' type='date'></label><button type='submit'>更新报表</button><button id='sync-button' type='button'>同步数据</button><a id='reauthorize-link' href='{{ '/auth/login' if not configuration_issues else '#' }}'>重新授权 / 添加角色</a></fieldset></form>
+      <p id='status-message' class='notice' role='status'>正在加载报表…</p>
+      <section class='summary-grid' aria-label='汇总'><article><p>到账收入</p><strong id='summary-income'>—</strong></article><article><p>已交税费</p><strong id='summary-tax'>—</strong></article><article><p>税后收入</p><strong id='summary-net'>—</strong></article></section>
+      <section class='panel'><h2>近 30 日趋势</h2><canvas id='trend-canvas' role='img' aria-label='收入、税费和税后收入趋势图'>收入趋势图：图表不可用时请查看下方连续日表。</canvas></section>
+      <section class='breakdowns'><section id='category-breakdown' class='panel'><h2>类型分项</h2><p>暂无数据</p></section><section id='character-breakdown' class='panel'><h2>角色分项</h2><p>暂无数据</p></section></section>
+      <section class='panel'><h2>每日明细</h2><div class='scroll'><table id='daily-table'><thead><tr><th>北京时间日期</th><th>到账</th><th>税费</th><th>税后</th></tr></thead><tbody></tbody></table></div></section>
+      <details id='entry-details' class='panel'><summary>已纳入流水明细</summary><div class='scroll'><table><thead><tr><th>日期</th><th>角色</th><th>类型</th><th>金额</th><th>说明</th></tr></thead><tbody></tbody></table></div></details>
+    </section>
+  </main><script src='/static/app.js' defer></script>
+</body></html>
