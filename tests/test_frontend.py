@@ -67,3 +67,15 @@ def test_dashboard_script_contract_covers_enable_sync_status_decimal_details_and
     assert 'sync-results' in page
     assert 'Number(x.net)' not in script
     assert 'innerHTML' not in script
+
+
+def test_dashboard_script_keeps_maximum_chart_ratio_and_role_controls_separate(tmp_path):
+    with client(tmp_path) as browser:
+        script = browser.get('/static/app.js').text
+
+    assert 'const integer = scaled / 1000000n;' in script
+    assert 'const fraction = scaled % 1000000n;' in script
+    assert r'''const row = document.createElement('div');''' in script
+    assert 'label.append(reportSelect, text);' in script
+    assert 'row.append(label, status, toggle);' in script
+    assert 'label.append(reportSelect, text, status, toggle);' not in script

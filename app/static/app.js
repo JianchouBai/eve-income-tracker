@@ -97,7 +97,9 @@ function normalizedRatios(days, key) {
   return values.map((value) => {
     const negative = value < 0n;
     const scaled = ((negative ? -value : value) * 1000000n) / maximum;
-    const ratio = `0.${scaled.toString().padStart(6, '0')}`;
+    const integer = scaled / 1000000n;
+    const fraction = scaled % 1000000n;
+    const ratio = `${integer}.${fraction.toString().padStart(6, '0')}`;
     return Number(`${negative ? '-' : ''}${ratio}`);
   });
 }
@@ -201,8 +203,9 @@ async function roles() {
   const box = $('enable-region');
   box.replaceChildren();
   data.characters.forEach((character) => {
+    const row = document.createElement('div');
+    row.className = 'role-row';
     const label = document.createElement('label');
-    label.className = 'role-row';
     const reportSelect = document.createElement('input');
     reportSelect.type = 'checkbox';
     reportSelect.value = character.character_id;
@@ -216,8 +219,9 @@ async function roles() {
     toggle.type = 'button';
     toggle.textContent = character.enabled ? '停止统计' : '启用统计';
     toggle.addEventListener('click', () => setEnabled(character.character_id, !character.enabled, toggle));
-    label.append(reportSelect, text, status, toggle);
-    box.append(label);
+    label.append(reportSelect, text);
+    row.append(label, status, toggle);
+    box.append(row);
   });
 }
 
