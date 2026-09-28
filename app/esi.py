@@ -46,6 +46,8 @@ class EsiClient:
     async def fetch_wallet_journal(
         self, access_token: str, character_id: int
     ) -> list[JournalEntry]:
+        if not self._settings._has_valid_user_agent():
+            raise EsiError('invalid_configuration', 'ESI client configuration is invalid.')
         first = await self._get_page(access_token, character_id, 1)
         pages = self._parse_pages(first.headers.get('X-Pages'))
         entries = self._decode_entries(first.content, character_id)
@@ -140,11 +142,13 @@ class EsiClient:
         journal_id = item['id']
         amount = item['amount']
         ref_type = item['ref_type']
-        date_utc = datetime.fromisoformat(item['date']).astimezone(UTC)
+        parsed_date = datetime.fromisoformat(item['date'])
+        if parsed_date.tzinfo is None or parsed_date.utcoffset() is None:
+            raise ValueError
+        date_utc = parsed_date.astimezone(UTC)
         if type(journal_id) is not int or journal_id <= 0:
             raise ValueError
-        if not isinstance(amount, Decimal) or not amount.is_finite():
-            raise ValueError
+        amount = EsiClient._decimal_value(amount)
         if not isinstance(ref_type, str) or not ref_type:
             raise ValueError
         return JournalEntry(
@@ -153,8 +157,8 @@ class EsiClient:
             date_utc=date_utc,
             amount=amount,
             ref_type=ref_type,
-            tax=item.get('tax'),
-            balance=item.get('balance'),
+            tax=EsiClient._decimal_value(item.get('tax'), optional=True),
+            balance=EsiClient._decimal_value(item.get('balance'), optional=True),
             description=item.get('description', ''),
             reason=item.get('reason'),
             context_id=item.get('context_id'),
@@ -165,3 +169,13 @@ class EsiClient:
             second_party_type=item.get('second_party_type'),
             tax_receiver_id=item.get('tax_receiver_id'),
         )
+
+    @staticmethod
+    def _decimal_value(value: object, optional: bool = False) -> Decimal | None:
+        if value is None and optional:
+            return None
+        if isinstance(value, Decimal) and value.is_finite():
+            return value
+        if type(value) is int:
+            return Decimal(value)
+        raise ValueError

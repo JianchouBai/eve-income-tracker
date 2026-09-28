@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -142,5 +143,39 @@ def test_malformed_later_page_raises_sanitized_data_error_without_partial_result
             with pytest.raises(EsiDataError) as caught:
                 await EsiClient(settings(), http).fetch_wallet_journal('token', 101)
         assert caught.value.code == 'invalid_data'
+
+    asyncio.run(scenario())
+
+
+def test_naive_timestamp_is_rejected_as_invalid_esi_data():
+    async def scenario():
+        payload = json.dumps([{'id': 1, 'date': '2026-09-27T12:00:00', 'amount': 1.0, 'ref_type': 'bounty_prizes'}]).encode()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=payload))) as http:
+            with pytest.raises(EsiDataError):
+                await EsiClient(settings(), http).fetch_wallet_journal('token', 101)
+
+    asyncio.run(scenario())
+
+
+def test_integer_monetary_fields_are_normalized_to_decimal():
+    async def scenario():
+        payload = json.dumps([{'id': 1, 'date': '2026-09-27T12:00:00Z', 'amount': 7, 'tax': 2, 'balance': 3, 'ref_type': 'bounty_prizes'}]).encode()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=payload))) as http:
+            entry = (await EsiClient(settings(), http).fetch_wallet_journal('token', 101))[0]
+        assert (entry.amount, entry.tax, entry.balance) == (Decimal(7), Decimal(2), Decimal(3))
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('user_agent', ['', 'eve-income-tracker', 'eve-income-tracker/0.1 (your-email@example.com)'])
+def test_invalid_user_agent_is_refused_before_http_request(user_agent: str):
+    async def scenario():
+        requests = []
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: requests.append(request))) as http:
+            configured = Settings(_env_file=None, eve_user_agent=user_agent)
+            with pytest.raises(EsiError) as caught:
+                await EsiClient(configured, http).fetch_wallet_journal('token', 101)
+        assert caught.value.code == 'invalid_configuration'
+        assert requests == []
 
     asyncio.run(scenario())

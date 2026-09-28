@@ -2,10 +2,12 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from cryptography.fernet import Fernet
+
 from app.esi import EsiAuthorizationError, EsiDataError
 from app.models import JournalEntry
 from app.security import TokenCipher
-from app.sso import TokenSet
+from app.sso import SsoError, TokenSet
 from app.storage import CharacterRepository, Database, JournalRepository
 from app.sync import SyncService
 
@@ -113,3 +115,54 @@ def test_sync_enabled_is_sequential_isolated_and_skips_disabled(tmp_path):
         assert all('access-token' not in str(item) for item in results.results)
 
     asyncio.run(scenario())
+
+
+def test_refresh_or_decrypt_failure_marks_only_role_as_authorization_required(tmp_path):
+    async def scenario():
+        characters, journal, cipher = services(tmp_path, enabled=(1, 2))
+        journal.commit_sync_batch(1, [entry(1, 9, START)], START)
+
+        class FailingSso:
+            async def refresh(self, refresh_token: str):
+                raise SsoError('invalid_grant', 'refresh-token-never-print')
+
+        refresh_result = await SyncService(characters, journal, cipher, FailingSso(), FakeEsi([]), clock=lambda: NOW).sync_character(1)
+        decrypt_result = await SyncService(characters, journal, TokenCipher(Fernet.generate_key()), FakeSso(), FakeEsi([]), clock=lambda: NOW).sync_character(2)
+
+        records = characters.list_all()
+        assert (refresh_result.status, refresh_result.error_code) == ('failed', 'authorization_failed')
+        assert (decrypt_result.status, decrypt_result.error_code) == ('failed', 'authorization_failed')
+        assert records[0].authorization_required is True
+        assert records[1].authorization_required is True
+        assert records[0].tracking_started_at == START
+        assert [item.journal_id for item in journal.list_for_report({1}, START, datetime(2026, 9, 29, tzinfo=UTC))] == [9]
+        assert 'refresh-token-never-print' not in str(refresh_result)
+
+    asyncio.run(scenario())
+
+
+def test_completion_clock_is_captured_after_success_or_failure_network_work(tmp_path):
+    async def scenario(response, expected_status):
+        characters, journal, cipher = services(tmp_path)
+        events = []
+
+        class OrderedEsi(FakeEsi):
+            async def fetch_wallet_journal(self, access_token: str, character_id: int):
+                events.append('fetch')
+                if isinstance(response, Exception):
+                    raise response
+                return [entry(1, 1, NOW)]
+
+        def clock():
+            events.append('clock')
+            return NOW
+
+        result = await SyncService(characters, journal, cipher, FakeSso(), OrderedEsi([]), clock=clock).sync_character(1)
+        assert result.status == expected_status
+        assert events == ['fetch', 'clock']
+        assert result.completed_at == NOW
+        if expected_status == 'ok':
+            assert characters.list_all()[0].last_synced_at == result.completed_at
+
+    asyncio.run(scenario([], 'ok'))
+    asyncio.run(scenario(EsiDataError('invalid_data', 'safe'), 'failed'))
