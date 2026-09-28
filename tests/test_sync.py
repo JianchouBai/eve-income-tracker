@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
 from cryptography.fernet import Fernet
 
 from app.esi import EsiAuthorizationError, EsiDataError
@@ -195,6 +196,66 @@ def test_refresh_or_decrypt_failure_marks_only_role_as_authorization_required(tm
             )
         ] == [9]
         assert "refresh-token-never-print" not in str(refresh_result)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["unavailable", "request_failed", "invalid_response", "invalid_metadata"],
+)
+@pytest.mark.parametrize("authorization_required", [False, True])
+def test_transient_sso_failure_preserves_role_authorization_and_cached_rows(
+    tmp_path, error_code, authorization_required
+):
+    async def scenario():
+        characters, journal, cipher = services(tmp_path)
+        journal.commit_sync_batch(1, [entry(1, 9, START)], START)
+
+        if authorization_required:
+            characters.mark_authorization_required(1)
+
+        class UnavailableSso:
+            async def refresh(self, refresh_token: str):
+                raise SsoError(error_code, "provider-detail-never-print")
+
+        result = await SyncService(
+            characters,
+            journal,
+            cipher,
+            UnavailableSso(),
+            FakeEsi([]),
+            clock=lambda: NOW,
+        ).sync_character(1)
+        record = characters.list_all()[0]
+        stored = journal.list_for_report({1}, START, datetime(2026, 9, 29, tzinfo=UTC))
+
+        assert (result.status, result.error_code) == ("failed", "sync_failed")
+        assert record.authorization_required is authorization_required
+        assert record.last_synced_at == START
+        assert cipher.decrypt(record.encrypted_refresh_token) == "refresh-1"
+        assert [item.journal_id for item in stored] == [9]
+        assert "provider-detail-never-print" not in str(result)
+
+    asyncio.run(scenario())
+
+
+def test_successful_sync_clears_stale_authorization_required_marker(tmp_path):
+    async def scenario():
+        characters, journal, cipher = services(tmp_path)
+        characters.mark_authorization_required(1)
+
+        result = await SyncService(
+            characters,
+            journal,
+            cipher,
+            FakeSso(),
+            FakeEsi([entry(1, 8, NOW)]),
+            clock=lambda: NOW,
+        ).sync_character(1)
+
+        assert (result.status, result.error_code) == ("ok", None)
+        assert characters.list_all()[0].authorization_required is False
 
     asyncio.run(scenario())
 

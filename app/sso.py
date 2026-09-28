@@ -99,6 +99,9 @@ class SsoClient:
             keys = await self._get_jwks()
             matches = [key for key in keys if key.get("kid") == kid]
             if len(matches) != 1:
+                keys = await self._get_jwks(force_refresh=True)
+                matches = [key for key in keys if key.get("kid") == kid]
+            if len(matches) != 1:
                 raise ValueError
             key = matches[0]
             if (
@@ -143,9 +146,10 @@ class SsoClient:
                 "invalid_token", "EVE SSO token verification failed."
             ) from None
 
-    async def _get_jwks(self) -> list[dict]:
+    async def _get_jwks(self, *, force_refresh: bool = False) -> list[dict]:
         if (
-            self._jwks is not None
+            not force_refresh
+            and self._jwks is not None
             and self._jwks_expires_at is not None
             and self._clock() < self._jwks_expires_at
         ):

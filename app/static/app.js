@@ -85,14 +85,21 @@ function decimalPart(value) {
   return { value: (match[1] === '-' ? -1n : 1n) * BigInt(digits), scale };
 }
 
-function normalizedRatios(days, key) {
-  const parts = days.map((day) => decimalPart(day[key]));
+function chartScale(days) {
+  const parts = days.flatMap((day) => ['income', 'tax', 'net'].map((key) => decimalPart(day[key])));
   const scale = parts.reduce((largest, part) => (part.scale > largest ? part.scale : largest), 0n);
   const values = parts.map((part) => part.value * (10n ** (scale - part.scale)));
   const maximum = values.reduce((largest, value) => {
     const absolute = value < 0n ? -value : value;
     return absolute > largest ? absolute : largest;
   }, 0n);
+  return { scale, maximum };
+}
+
+function normalizedRatios(days, key, chart) {
+  const parts = days.map((day) => decimalPart(day[key]));
+  const values = parts.map((part) => part.value * (10n ** (chart.scale - part.scale)));
+  const maximum = chart.maximum;
   if (maximum === 0n) return values.map(() => 0);
   return values.map((value) => {
     const negative = value < 0n;
@@ -136,9 +143,10 @@ function draw(days) {
   ctx.moveTo(0, height / 2);
   ctx.lineTo(width, height / 2);
   ctx.stroke();
-  drawSeries(ctx, normalizedRatios(days, 'income'), '#61d7e8', width, height);
-  drawSeries(ctx, normalizedRatios(days, 'tax'), '#f6bc62', width, height);
-  drawSeries(ctx, normalizedRatios(days, 'net'), '#d8e5ef', width, height);
+  const chart = chartScale(days);
+  drawSeries(ctx, normalizedRatios(days, 'income', chart), '#61d7e8', width, height);
+  drawSeries(ctx, normalizedRatios(days, 'tax', chart), '#f6bc62', width, height);
+  drawSeries(ctx, normalizedRatios(days, 'net', chart), '#d8e5ef', width, height);
   canvas.setAttribute('aria-label', '收入（青色）、税费（琥珀色）和税后收入（白色）趋势图；下方每日明细表提供等价文本数据。');
   fallback.textContent = `图表文本降级：${days.map((day) => `${day.date}，到账 ${isk(day.income)}，税费 ${isk(day.tax)}，税后 ${isk(day.net)}`).join('；') || '暂无数据。'}`;
 }

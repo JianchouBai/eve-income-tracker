@@ -1,3 +1,5 @@
+import re
+
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -89,6 +91,40 @@ def test_dashboard_script_contract_covers_enable_sync_status_decimal_details_and
     assert "sync-results" in page
     assert "Number(x.net)" not in script
     assert "innerHTML" not in script
+
+
+def test_dashboard_chart_contract_uses_one_exact_scale_for_all_money_series(tmp_path):
+    with client(tmp_path) as browser:
+        script = browser.get("/static/app.js").text
+
+    # The served asset must pool all three monetary series before finding its
+    # exact maximum; otherwise income=100, tax=10, net=90 each peak at 1.
+    scale = script.split("function chartScale(days) {", 1)[1].split(
+        "function normalizedRatios", 1
+    )[0]
+    assert "days.flatMap" in scale
+    assert "['income', 'tax', 'net'].map((key) => decimalPart(day[key]))" in scale
+    assert "part.value * (10n ** (scale - part.scale))" in scale
+    assert "const absolute = value < 0n ? -value : value;" in scale
+    assert "absolute > largest ? absolute : largest" in scale
+    assert "return { scale, maximum };" in scale
+
+    normalize = script.split("function normalizedRatios", 1)[1].split(
+        "function drawSeries", 1
+    )[0]
+    assert "chart.scale - part.scale" in normalize
+    assert "const maximum = chart.maximum;" in normalize
+    assert "reduce(" not in normalize
+    assert "if (maximum === 0n) return values.map(() => 0);" in normalize
+    assert "const chart = chartScale(days);" in script
+    for key in ("income", "tax", "net"):
+        assert f"normalizedRatios(days, '{key}', chart)" in script
+
+    # Audit every Number call, so a new raw monetary expression cannot slip
+    # through a blacklist that checks only particular variable names.
+    assert re.findall(r"\bNumber\s*\((.*?)\)", script, re.DOTALL) == [
+        "`${negative ? '-' : ''}${ratio}`"
+    ]
 
 
 def test_dashboard_script_keeps_maximum_chart_ratio_and_role_controls_separate(

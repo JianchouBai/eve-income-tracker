@@ -134,6 +134,9 @@ class CharacterRepository:
     def mark_authorization_required(self, character_id: int) -> None:
         self._update(character_id, "authorization_required", 1)
 
+    def clear_authorization_required(self, character_id: int) -> None:
+        self._update(character_id, "authorization_required", 0)
+
     def _update(self, character_id: int, column: str, value: object) -> None:
         with self.database.connection() as connection:
             connection.execute(

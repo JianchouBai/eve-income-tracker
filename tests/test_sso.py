@@ -432,6 +432,77 @@ def test_unverified_tokens_are_rejected_without_disclosing_token(
         asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("cached_matches", [0, 2])
+def test_new_kid_refreshes_cached_jwks_once_and_verifies_rotated_key(
+    signing_keys, jwt_clock, cached_matches
+):
+    async def scenario():
+        requests = []
+        old_key = public_jwk(signing_keys[0], "old-key")
+        new_key = public_jwk(signing_keys[1], "new-key")
+        old_token = jwt.encode(
+            claims(), signing_keys[0], algorithm="RS256", headers={"kid": "old-key"}
+        )
+        new_token = jwt.encode(
+            claims(), signing_keys[1], algorithm="RS256", headers={"kid": "new-key"}
+        )
+
+        def handle(request):
+            requests.append(str(request.url))
+            if str(request.url) == DISCOVERY:
+                return httpx.Response(200, json=METADATA)
+            assert str(request.url) == METADATA["jwks_uri"]
+            keys = (
+                [old_key] + [new_key] * cached_matches
+                if requests.count(METADATA["jwks_uri"]) == 1
+                else [new_key]
+            )
+            return httpx.Response(200, json={"keys": keys})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            sso = SsoClient(settings(), http, jwt_clock)
+            await sso.verify_access_token(old_token)
+            identity = await sso.verify_access_token(new_token)
+            assert identity.character_id == 2112345678
+            assert identity.character_name == "Verified Pilot"
+            assert requests == [DISCOVERY, METADATA["jwks_uri"], METADATA["jwks_uri"]]
+            await sso.verify_access_token(new_token)
+            assert len(requests) == 3
+
+    asyncio.run(scenario())
+
+
+def test_still_unknown_kid_fails_safely_after_one_forced_refresh(
+    signing_keys, jwt_clock, caplog
+):
+    async def scenario():
+        requests = []
+        known_token = jwt.encode(
+            claims(),
+            signing_keys[0],
+            algorithm="RS256",
+            headers={"kid": "selected-key"},
+        )
+        unknown_token = jwt.encode(
+            claims(), signing_keys[0], algorithm="RS256", headers={"kid": "unknown-key"}
+        )
+        async with httpx.AsyncClient(
+            transport=jwt_transport(signing_keys, requests)
+        ) as http:
+            sso = SsoClient(settings(), http, jwt_clock)
+            await sso.verify_access_token(known_token)
+            with pytest.raises(SsoError) as caught:
+                await sso.verify_access_token(unknown_token)
+            assert caught.value.code == "invalid_token"
+            assert requests == [DISCOVERY, METADATA["jwks_uri"], METADATA["jwks_uri"]]
+            assert unknown_token not in "".join(
+                traceback.format_exception(caught.value)
+            )
+            assert unknown_token not in caplog.text
+
+    asyncio.run(scenario())
+
+
 def test_jwks_cache_expires_at_one_hour(signing_keys, jwt_clock):
     async def scenario():
         requests = []

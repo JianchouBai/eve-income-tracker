@@ -74,17 +74,20 @@ class SyncService:
             new_count = self._journal.commit_sync_batch(
                 character_id, retained, completed_at
             )
+            self._characters.clear_authorization_required(character_id)
             return SyncResult(character_id, new_count, completed_at, "ok", None)
-        except EsiAuthorizationError:
+        except (EsiAuthorizationError, InvalidToken):
             self._characters.mark_authorization_required(character_id)
             return SyncResult(
                 character_id, 0, self._clock(), "failed", "authorization_failed"
             )
-        except (InvalidToken, SsoError):
-            self._characters.mark_authorization_required(character_id)
-            return SyncResult(
-                character_id, 0, self._clock(), "failed", "authorization_failed"
-            )
+        except SsoError as error:
+            if error.code == "invalid_grant":
+                self._characters.mark_authorization_required(character_id)
+                return SyncResult(
+                    character_id, 0, self._clock(), "failed", "authorization_failed"
+                )
+            return SyncResult(character_id, 0, self._clock(), "failed", "sync_failed")
         except EsiError as error:
             return SyncResult(character_id, 0, self._clock(), "failed", error.code)
         except Exception:  # noqa: BLE001 - sync is a sanitized service boundary.
