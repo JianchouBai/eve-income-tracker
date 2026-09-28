@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -13,6 +13,8 @@ UTC = timezone.utc  # noqa: UP017 - test runtime is Python 3.10.
 
 
 def _utc_iso(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise ValueError("timestamp must be timezone-aware UTC")
     return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 

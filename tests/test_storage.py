@@ -1,6 +1,6 @@
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -9,6 +9,11 @@ from app.models import JournalEntry
 from app.storage import CharacterRepository, Database, JournalRepository
 
 UTC = timezone.utc  # noqa: UP017 - test runtime is Python 3.10.
+
+INVALID_UTC_BOUNDARIES = (
+    datetime(2026, 9, 1, 12),  # noqa: DTZ001 - deliberate naive boundary input.
+    datetime(2026, 9, 1, 12, tzinfo=timezone(timedelta(hours=8))),
+)
 
 
 def journal(character_id: int, journal_id: int, amount: str = "1") -> JournalEntry:
@@ -34,9 +39,9 @@ def test_initialize_is_idempotent_and_enables_foreign_keys(tmp_path):
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO wallet_journal "
-                "(character_id, journal_id, date_utc, amount, ref_type) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (999, 1, "x", "1", "x"),
+                "(character_id, journal_id, date_utc, amount, ref_type, description) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (999, 1, "x", "1", "x", "orphan"),
             )
 
 
@@ -56,6 +61,17 @@ def test_upsert_authorization_creates_enabled_authorized_character(tmp_path):
     assert character.enabled is True
     assert character.authorization_required is False
     assert character.last_synced_at is None
+
+
+@pytest.mark.parametrize("authorized_at", INVALID_UTC_BOUNDARIES)
+def test_authorization_rejects_non_utc_timestamp(tmp_path, authorized_at):
+    database = Database(tmp_path / "income.sqlite3")
+    database.initialize()
+
+    with pytest.raises(ValueError, match="timezone-aware UTC"):
+        CharacterRepository(database).upsert_authorization(
+            1001, "Astra", "token", authorized_at
+        )
 
 
 def test_reauthorization_preserves_start_and_characters_are_distinct(tmp_path):
@@ -117,6 +133,20 @@ def test_commit_sync_batch_preserves_decimal_and_is_idempotent(tmp_path):
     )[0].amount == Decimal("9007199254740993.01")
 
 
+@pytest.mark.parametrize("completed_at", INVALID_UTC_BOUNDARIES)
+def test_sync_completion_rejects_non_utc_timestamp(tmp_path, completed_at):
+    database = Database(tmp_path / "income.sqlite3")
+    database.initialize()
+    CharacterRepository(database).upsert_authorization(
+        1001, "Astra", "token", datetime(2026, 9, 1, tzinfo=UTC)
+    )
+
+    with pytest.raises(ValueError, match="timezone-aware UTC"):
+        JournalRepository(database).commit_sync_batch(
+            1001, [journal(1001, 77)], completed_at
+        )
+
+
 def test_journal_keys_are_per_character_and_metadata_is_updated(tmp_path):
     database = Database(tmp_path / "income.sqlite3")
     database.initialize()
@@ -145,6 +175,17 @@ def test_journal_keys_are_per_character_and_metadata_is_updated(tmp_path):
         (1001, 77, "updated"),
         (2002, 77, "initial description"),
     ]
+
+
+def test_report_range_rejects_non_utc_boundaries(tmp_path):
+    repository = JournalRepository(Database(tmp_path / "income.sqlite3"))
+    valid = datetime(2026, 9, 2, tzinfo=UTC)
+
+    for invalid in INVALID_UTC_BOUNDARIES:
+        with pytest.raises(ValueError, match="timezone-aware UTC"):
+            repository.list_for_report({1001}, invalid, valid)
+        with pytest.raises(ValueError, match="timezone-aware UTC"):
+            repository.list_for_report({1001}, valid, invalid)
 
 
 def test_failed_batch_rolls_back_rows_and_last_synced_at(tmp_path):
