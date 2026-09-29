@@ -1,0 +1,6 @@
+{
+  "eve_client_id": "replace-with-public-client-id",
+  "eve_callback_url": "http://localhost:8000/auth/callback",
+  "eve_user_agent": "eve-income-tracker/0.1 (replace-with-contact@example.com)",
+  "esi_compatibility_date": "2026-05-19"
+}

@@ -1,6 +1,7 @@
 import re
 from datetime import date
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
@@ -17,6 +18,9 @@ class Settings(BaseSettings):
         extra="ignore",
         validate_default=True,
     )
+
+    runtime_mode: Literal["development", "desktop"] = "development"
+    resource_root: Path = PROJECT_ROOT
 
     eve_client_id: str = ""
     eve_client_secret: str = ""

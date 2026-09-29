@@ -9,4 +9,11 @@ __pycache__/
 .coverage
 coverage.xml
 htmlcov/
-
+release-config.local.json
+vendor/MicrosoftEdgeWebview2Setup.exe
+build/
+dist/
+installer-output/
+*.key
+*.log
+backups/

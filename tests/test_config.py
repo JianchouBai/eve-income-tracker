@@ -26,6 +26,8 @@ def test_defaults_use_documented_callback_database_and_compatibility_date():
     settings = Settings(_env_file=None)
     project_root = Path(__file__).resolve().parents[1]
 
+    assert settings.runtime_mode == "development"
+    assert settings.resource_root == project_root
     assert settings.eve_callback_url == "http://localhost:8000/auth/callback"
     assert settings.database_path == project_root / "data" / "eve_income.sqlite3"
     assert settings.esi_compatibility_date == "2026-05-19"
