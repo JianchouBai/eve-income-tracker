@@ -14,6 +14,16 @@ def _require_decimal(value: Decimal, field_name: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class CharacterGroupRecord:
+    group_id: int
+    name: str
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_utc(self.created_at, "created_at")
+
+
+@dataclass(frozen=True, slots=True)
 class CharacterRecord:
     character_id: int
     name: str
@@ -22,6 +32,7 @@ class CharacterRecord:
     authorization_required: bool
     tracking_started_at: datetime
     last_synced_at: datetime | None
+    group_id: int | None = None
 
     def __post_init__(self) -> None:
         _require_utc(self.tracking_started_at, "tracking_started_at")
