@@ -16,6 +16,22 @@ ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "scripts" / "smoke_app.py"
 
 
+def test_repository_frontend_design_skill_is_complete():
+    skill_path = ROOT / '.codex' / 'skills' / 'frontend-design' / 'SKILL.md'
+    license_path = skill_path.with_name('LICENSE.txt')
+
+    assert skill_path.is_file()
+    assert license_path.is_file()
+
+    skill = skill_path.read_text(encoding='utf-8')
+    license_text = license_path.read_text(encoding='utf-8')
+    assert skill.startswith('---\n')
+    assert 'name: frontend-design' in skill
+    assert 'license: Complete terms in LICENSE.txt' in skill
+    assert 'Apache License' in license_text
+    assert 'Version 2.0' in license_text
+
+
 def test_example_environment_covers_operational_settings_without_usable_secrets():
     example = ROOT / ".env.example"
     assert example.is_file()
