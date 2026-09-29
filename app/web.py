@@ -1,3 +1,4 @@
+import logging
 import re
 import secrets
 import sqlite3
@@ -26,7 +27,36 @@ from app.storage import CharacterRepository, JournalRepository
 from app.sync import SyncService
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
 _EPHEMERAL_SESSION_SECRET = secrets.token_urlsafe(48)
+SAFE_SSO_ERROR_CODES = frozenset(
+    {
+        "expired_token",
+        "immature_token",
+        "invalid_audience_claim",
+        "invalid_grant",
+        "invalid_issuer",
+        "invalid_jwks",
+        "invalid_metadata",
+        "invalid_name_claim",
+        "invalid_response",
+        "invalid_claims",
+        "invalid_scope_format",
+        "invalid_signature",
+        "invalid_standard_claims",
+        "invalid_subject_claim",
+        "invalid_token",
+        "malformed_token",
+        "missing_required_claim",
+        "missing_key_id",
+        "request_failed",
+        "signing_key_not_found",
+        "unavailable",
+        "unsupported_algorithm",
+        "unsupported_es256",
+        "wallet_scope_not_granted",
+    }
+)
 SYNC_MESSAGES = {
     "authorization_failed": "角色授权已失效，请重新授权。",
     "rate_limited": "请求过于频繁，请稍后重试。",
@@ -71,6 +101,15 @@ def _matches(actual: str | None, expected: str | None) -> bool:
         and expected
         and secrets.compare_digest(actual.encode(), expected.encode())
     )
+
+
+def _log_authorization_failure(stage: str, error: Exception) -> None:
+    code = (
+        error.code
+        if isinstance(error, SsoError) and error.code in SAFE_SSO_ERROR_CODES
+        else "unexpected_error"
+    )
+    logger.warning("EVE authorization failed: stage=%s code=%s", stage, code)
 
 
 def _require_viewer(request: Request) -> None:
@@ -229,8 +268,15 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
             raise WebError(400, "authorization_failed", "EVE 授权未完成，请重试。")
         try:
             tokens = await services.sso.exchange_code(code)
+        except Exception as error:  # noqa: BLE001 - log only safe diagnostics.
+            _log_authorization_failure("token_exchange", error)
+            raise WebError(
+                502, "authorization_failed", "EVE 授权验证失败，请重试。"
+            ) from None
+        try:
             identity = await services.sso.verify_access_token(tokens.access_token)
-        except Exception:  # noqa: BLE001 - sanitize the external authorization boundary.
+        except Exception as error:  # noqa: BLE001 - log only safe diagnostics.
+            _log_authorization_failure("token_verification", error)
             raise WebError(
                 502, "authorization_failed", "EVE 授权验证失败，请重试。"
             ) from None

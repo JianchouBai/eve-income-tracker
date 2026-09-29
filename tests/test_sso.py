@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from app.config import Settings
 from app.sso import SsoClient, SsoError
@@ -311,7 +311,12 @@ def jwt_transport(signing_keys, requests, jwks=None):
 
 
 @pytest.mark.parametrize(
-    "issuer", ["https://login.eveonline.com/", "login.eveonline.com"]
+    "issuer",
+    [
+        "https://login.eveonline.com/",
+        "https://login.eveonline.com",
+        "login.eveonline.com",
+    ],
 )
 def test_verified_identity_uses_selected_key_and_signed_claims(
     signing_keys, jwt_clock, issuer
@@ -334,40 +339,86 @@ def test_verified_identity_uses_selected_key_and_signed_claims(
     asyncio.run(scenario())
 
 
+def test_verified_identity_accepts_exact_single_scope_string(signing_keys, jwt_clock):
+    async def scenario():
+        token = jwt.encode(
+            claims(scp=WALLET_SCOPE),
+            signing_keys[0],
+            algorithm="RS256",
+            headers={"kid": "selected-key"},
+        )
+        async with httpx.AsyncClient(transport=jwt_transport(signing_keys, [])) as http:
+            identity = await SsoClient(settings(), http, jwt_clock).verify_access_token(
+                token
+            )
+
+        assert identity.character_id == 2112345678
+        assert identity.character_name == "Verified Pilot"
+        assert identity.scopes == (WALLET_SCOPE,)
+
+    asyncio.run(scenario())
+
+
+def test_es256_token_reports_unsupported_transition_without_disclosing_token(
+    jwt_clock, caplog
+):
+    async def scenario():
+        signing_key = ec.generate_private_key(ec.SECP256R1())
+        token = jwt.encode(
+            claims(),
+            signing_key,
+            algorithm="ES256",
+            headers={"kid": "eve-ec-key"},
+        )
+
+        async with httpx.AsyncClient() as http:
+            with pytest.raises(SsoError) as caught:
+                await SsoClient(settings(), http, jwt_clock).verify_access_token(token)
+
+        assert caught.value.code == "unsupported_es256"
+        assert token not in "".join(traceback.format_exception(caught.value))
+        assert token not in caplog.text
+
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
-    "overrides",
+    ("overrides", "expected_code"),
     [
-        {"aud": ["EVE Online"]},
-        {"aud": ["client-id"]},
-        {"aud": "client-id EVE Online"},
-        {"aud": None},
-        {"aud": [[], "EVE Online"]},
-        {"iss": "https://login.eveonline.com/" + "evil"},
-        {"iss": "https://login.eveonline.com"},
-        {"iss": None},
-        {"exp": 1893456000},
-        {"exp": 1893455999},
-        {"exp": None},
-        {"exp": "not-a-time"},
-        {"scp": []},
-        {"scp": ["other-scope"]},
-        {"scp": None},
-        {"scp": "prefix-" + WALLET_SCOPE},
-        {"scp": [WALLET_SCOPE, []]},
-        {"sub": "CHARACTER:EVE:0"},
-        {"sub": "CHARACTER:EVE:-1"},
-        {"sub": "CHARACTER:EVE:01"},
-        {"sub": "CHARACTER:EVE:12suffix"},
-        {"sub": "CHARACTER:EVE:12\n"},
-        {"sub": "CHARACTER:EVE:１２"},
-        {"sub": "CORPORATION:EVE:12"},
-        {"sub": None},
-        {"sub": 12},
-        {"name": None},
-        {"name": ""},
+        ({"aud": ["EVE Online"]}, "invalid_audience_claim"),
+        ({"aud": ["client-id"]}, "invalid_audience_claim"),
+        ({"aud": "client-id EVE Online"}, "invalid_audience_claim"),
+        ({"aud": None}, "missing_required_claim"),
+        ({"aud": [[], "EVE Online"]}, "invalid_audience_claim"),
+        ({"iss": "https://login.eveonline.com/" + "evil"}, "invalid_issuer"),
+        ({"iss": None}, "missing_required_claim"),
+        ({"exp": 1893456000}, "expired_token"),
+        ({"exp": 1893455999}, "expired_token"),
+        ({"exp": None}, "missing_required_claim"),
+        ({"exp": "not-a-time"}, "invalid_standard_claims"),
+        ({"iat": 1893456001}, "immature_token"),
+        ({"scp": []}, "wallet_scope_not_granted"),
+        ({"scp": ["other-scope"]}, "wallet_scope_not_granted"),
+        ({"scp": None}, "missing_required_claim"),
+        ({"scp": "prefix-" + WALLET_SCOPE}, "wallet_scope_not_granted"),
+        ({"scp": [WALLET_SCOPE, []]}, "invalid_scope_format"),
+        ({"sub": "CHARACTER:EVE:0"}, "invalid_subject_claim"),
+        ({"sub": "CHARACTER:EVE:-1"}, "invalid_subject_claim"),
+        ({"sub": "CHARACTER:EVE:01"}, "invalid_subject_claim"),
+        ({"sub": "CHARACTER:EVE:12suffix"}, "invalid_subject_claim"),
+        ({"sub": "CHARACTER:EVE:12\n"}, "invalid_subject_claim"),
+        ({"sub": "CHARACTER:EVE:１２"}, "invalid_subject_claim"),
+        ({"sub": "CORPORATION:EVE:12"}, "invalid_subject_claim"),
+        ({"sub": None}, "missing_required_claim"),
+        ({"sub": 12}, "invalid_standard_claims"),
+        ({"name": None}, "missing_required_claim"),
+        ({"name": ""}, "invalid_name_claim"),
     ],
 )
-def test_invalid_signed_claims_are_rejected(signing_keys, jwt_clock, overrides):
+def test_invalid_signed_claims_report_safe_category(
+    signing_keys, jwt_clock, overrides, expected_code
+):
     async def scenario():
         token = jwt.api_jws.encode(
             json.dumps(claims(**overrides)).encode(),
@@ -376,8 +427,9 @@ def test_invalid_signed_claims_are_rejected(signing_keys, jwt_clock, overrides):
             headers={"kid": "selected-key"},
         )
         async with httpx.AsyncClient(transport=jwt_transport(signing_keys, [])) as http:
-            with pytest.raises(SsoError):
+            with pytest.raises(SsoError) as caught:
                 await SsoClient(settings(), http, jwt_clock).verify_access_token(token)
+            assert caught.value.code == expected_code
 
     asyncio.run(scenario())
 
@@ -391,18 +443,27 @@ def test_missing_required_claim_is_rejected(signing_keys, jwt_clock, missing):
             payload, signing_keys[0], algorithm="RS256", headers={"kid": "selected-key"}
         )
         async with httpx.AsyncClient(transport=jwt_transport(signing_keys, [])) as http:
-            with pytest.raises(SsoError):
+            with pytest.raises(SsoError) as caught:
                 await SsoClient(settings(), http, jwt_clock).verify_access_token(token)
+            assert caught.value.code == "missing_required_claim"
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
-    "failure",
-    ["signature", "unknown-kid", "missing-kid", "RS512", "HS256", "none", "malformed"],
+    ("failure", "expected_code"),
+    [
+        ("signature", "invalid_signature"),
+        ("unknown-kid", "signing_key_not_found"),
+        ("missing-kid", "missing_key_id"),
+        ("RS512", "unsupported_algorithm"),
+        ("HS256", "unsupported_algorithm"),
+        ("none", "unsupported_algorithm"),
+        ("malformed", "malformed_token"),
+    ],
 )
 def test_unverified_tokens_are_rejected_without_disclosing_token(
-    signing_keys, jwt_clock, failure, caplog
+    signing_keys, jwt_clock, failure, expected_code, caplog
 ):
     async def scenario():
         headers = {"kid": "selected-key"}
@@ -425,6 +486,7 @@ def test_unverified_tokens_are_rejected_without_disclosing_token(
         async with httpx.AsyncClient(transport=jwt_transport(signing_keys, [])) as http:
             with pytest.raises(SsoError) as caught:
                 await SsoClient(settings(), http, jwt_clock).verify_access_token(token)
+            assert caught.value.code == expected_code
             assert token not in "".join(traceback.format_exception(caught.value))
             assert token not in caplog.text
 
@@ -493,7 +555,7 @@ def test_still_unknown_kid_fails_safely_after_one_forced_refresh(
             await sso.verify_access_token(known_token)
             with pytest.raises(SsoError) as caught:
                 await sso.verify_access_token(unknown_token)
-            assert caught.value.code == "invalid_token"
+            assert caught.value.code == "signing_key_not_found"
             assert requests == [DISCOVERY, METADATA["jwks_uri"], METADATA["jwks_uri"]]
             assert unknown_token not in "".join(
                 traceback.format_exception(caught.value)

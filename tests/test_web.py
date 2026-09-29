@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -13,7 +14,7 @@ from app.config import Settings
 from app.esi import EsiDataError, EsiError
 from app.models import JournalEntry
 from app.security import TokenCipher
-from app.sso import CharacterIdentity, TokenSet
+from app.sso import CharacterIdentity, SsoError, TokenSet
 from app.storage import CharacterRepository, Database, JournalRepository
 from app.sync import SyncAllResult, SyncResult
 from app.web import AppServices, create_app
@@ -46,7 +47,7 @@ class FakeSso:
     async def exchange_code(self, code):
         self.exchange_calls.append(code)
         if self.failure == "exchange":
-            raise RuntimeError("private-sso-secret")
+            raise SsoError("request_failed", "private-sso-secret")
         return TokenSet(
             "private-access",
             self.refresh_token,
@@ -56,7 +57,9 @@ class FakeSso:
     async def verify_access_token(self, token):
         self.verified_tokens.append(token)
         if self.failure == "verify":
-            raise RuntimeError("private-sso-secret")
+            raise SsoError("unsupported_es256", "private-sso-secret")
+        if isinstance(self.failure, str) and self.failure.startswith("verify:"):
+            raise SsoError(self.failure.removeprefix("verify:"), "private-sso-secret")
         return self.identity
 
 
@@ -303,6 +306,63 @@ def test_callback_failures_are_sanitized_and_do_not_authorize(context, failure):
         assert not session_data(client, settings.app_session_secret).get(
             "viewer_authenticated"
         )
+
+
+@pytest.mark.parametrize(
+    ("failure", "stage", "code"),
+    [
+        ("exchange", "token_exchange", "request_failed"),
+        ("verify", "token_verification", "unsupported_es256"),
+    ],
+)
+def test_callback_failure_logs_safe_stage_and_code(
+    context, caplog, failure, stage, code
+):
+    settings, services, clock = context
+    services.sso.failure = failure
+    with (
+        caplog.at_level(logging.WARNING, logger="app.web"),
+        TestClient(create_app(settings, services, clock)) as client,
+    ):
+        response = authorize(client, settings)
+
+    assert response.status_code == 502
+    assert f"EVE authorization failed: stage={stage} code={code}" in caplog.messages
+    assert "private-" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "expired_token",
+        "immature_token",
+        "invalid_audience_claim",
+        "invalid_issuer",
+        "invalid_name_claim",
+        "invalid_scope_format",
+        "invalid_standard_claims",
+        "invalid_subject_claim",
+        "missing_required_claim",
+        "wallet_scope_not_granted",
+    ],
+)
+def test_callback_logs_new_claim_category_without_sensitive_values(
+    context, caplog, code
+):
+    settings, services, clock = context
+    services.sso.failure = f"verify:{code}"
+    with (
+        caplog.at_level(logging.WARNING, logger="app.web"),
+        TestClient(create_app(settings, services, clock)) as client,
+    ):
+        response = authorize(client, settings)
+
+    assert response.status_code == 502
+    assert (
+        f"EVE authorization failed: stage=token_verification code={code}"
+        in caplog.messages
+    )
+    assert "private-" not in caplog.text
 
 
 def test_callback_sync_failure_preserves_character_and_redirects_with_safe_status(

@@ -93,58 +93,127 @@ class SsoClient:
     async def verify_access_token(self, access_token: str) -> CharacterIdentity:
         try:
             header = jwt.get_unverified_header(access_token)
-            kid = header.get("kid")
-            if header.get("alg") != "RS256" or not isinstance(kid, str) or not kid:
-                raise ValueError
-            keys = await self._get_jwks()
+        except (jwt.PyJWTError, ValueError, TypeError):
+            raise SsoError(
+                "malformed_token", "EVE SSO token verification failed."
+            ) from None
+
+        algorithm = header.get("alg")
+        if algorithm == "ES256":
+            raise SsoError("unsupported_es256", "EVE SSO token verification failed.")
+        if algorithm != "RS256":
+            raise SsoError(
+                "unsupported_algorithm", "EVE SSO token verification failed."
+            )
+
+        kid = header.get("kid")
+        if not isinstance(kid, str) or not kid:
+            raise SsoError("missing_key_id", "EVE SSO token verification failed.")
+
+        keys = await self._get_jwks()
+        matches = [key for key in keys if key.get("kid") == kid]
+        if len(matches) != 1:
+            keys = await self._get_jwks(force_refresh=True)
             matches = [key for key in keys if key.get("kid") == kid]
-            if len(matches) != 1:
-                keys = await self._get_jwks(force_refresh=True)
-                matches = [key for key in keys if key.get("kid") == kid]
-            if len(matches) != 1:
-                raise ValueError
-            key = matches[0]
-            if (
-                key.get("kty") != "RSA"
-                or key.get("alg", "RS256") != "RS256"
-                or key.get("use", "sig") != "sig"
-            ):
-                raise ValueError
+        if len(matches) != 1:
+            raise SsoError(
+                "signing_key_not_found", "EVE SSO token verification failed."
+            )
+
+        key = matches[0]
+        if (
+            key.get("kty") != "RSA"
+            or key.get("alg", "RS256") != "RS256"
+            or key.get("use", "sig") != "sig"
+        ):
+            raise SsoError("invalid_jwks", "EVE SSO signing keys are invalid.")
+        try:
             public_key = jwt.PyJWK.from_dict(key, algorithm="RS256").key
+        except (jwt.PyJWTError, ValueError, TypeError, KeyError):
+            raise SsoError(
+                "invalid_jwks", "EVE SSO signing keys are invalid."
+            ) from None
+
+        try:
             claims = jwt.decode(
                 access_token,
                 public_key,
                 algorithms=["RS256"],
-                issuer=["https://login.eveonline.com/", "login.eveonline.com"],
+                issuer=[
+                    "https://login.eveonline.com/",
+                    "https://login.eveonline.com",
+                    "login.eveonline.com",
+                ],
                 options={
                     "verify_aud": False,
                     "require": ["exp", "iss", "aud", "scp", "sub", "name"],
                 },
             )
-            audience = claims["aud"]
-            scopes = claims["scp"]
-            subject = claims["sub"]
-            name = claims["name"]
-            if (
-                not isinstance(audience, list)
-                or not all(isinstance(value, str) for value in audience)
-                or not {self._settings.eve_client_id, "EVE Online"}.issubset(audience)
-                or not isinstance(scopes, list)
-                or not all(isinstance(value, str) for value in scopes)
-                or WALLET_SCOPE not in scopes
-                or not isinstance(subject, str)
-                or re.fullmatch(r"CHARACTER:EVE:[1-9][0-9]*", subject) is None
-                or not isinstance(name, str)
-                or not name.strip()
-            ):
-                raise ValueError
-            return CharacterIdentity(
-                int(subject.removeprefix("CHARACTER:EVE:")), name, tuple(scopes)
-            )
+        except jwt.InvalidSignatureError:
+            raise SsoError(
+                "invalid_signature", "EVE SSO token verification failed."
+            ) from None
+        except jwt.ExpiredSignatureError:
+            raise SsoError(
+                "expired_token", "EVE SSO token verification failed."
+            ) from None
+        except jwt.ImmatureSignatureError:
+            raise SsoError(
+                "immature_token", "EVE SSO token verification failed."
+            ) from None
+        except jwt.InvalidIssuerError:
+            raise SsoError(
+                "invalid_issuer", "EVE SSO token verification failed."
+            ) from None
+        except jwt.MissingRequiredClaimError:
+            raise SsoError(
+                "missing_required_claim", "EVE SSO token verification failed."
+            ) from None
         except (jwt.PyJWTError, ValueError, TypeError, KeyError, OverflowError):
             raise SsoError(
-                "invalid_token", "EVE SSO token verification failed."
+                "invalid_standard_claims", "EVE SSO token verification failed."
             ) from None
+
+        audience = claims["aud"]
+        if (
+            not isinstance(audience, list)
+            or not all(isinstance(value, str) for value in audience)
+            or not {self._settings.eve_client_id, "EVE Online"}.issubset(audience)
+        ):
+            raise SsoError(
+                "invalid_audience_claim", "EVE SSO token verification failed."
+            )
+
+        raw_scopes = claims["scp"]
+        if isinstance(raw_scopes, str):
+            scopes = [raw_scopes]
+        elif isinstance(raw_scopes, list) and all(
+            isinstance(value, str) for value in raw_scopes
+        ):
+            scopes = raw_scopes
+        else:
+            raise SsoError("invalid_scope_format", "EVE SSO token verification failed.")
+        if WALLET_SCOPE not in scopes:
+            raise SsoError(
+                "wallet_scope_not_granted", "EVE SSO token verification failed."
+            )
+
+        subject = claims["sub"]
+        if (
+            not isinstance(subject, str)
+            or re.fullmatch(r"CHARACTER:EVE:[1-9][0-9]*", subject) is None
+        ):
+            raise SsoError(
+                "invalid_subject_claim", "EVE SSO token verification failed."
+            )
+
+        name = claims["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise SsoError("invalid_name_claim", "EVE SSO token verification failed.")
+
+        return CharacterIdentity(
+            int(subject.removeprefix("CHARACTER:EVE:")), name, tuple(scopes)
+        )
 
     async def _get_jwks(self, *, force_refresh: bool = False) -> list[dict]:
         if (
