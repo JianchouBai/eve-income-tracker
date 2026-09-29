@@ -87,7 +87,7 @@ class Database:
 def _create_version_two_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE character_groups ("
-        "group_id INTEGER PRIMARY KEY, "
+        "group_id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "name TEXT NOT NULL COLLATE NOCASE UNIQUE, "
         "created_at TEXT NOT NULL)"
     )
@@ -119,7 +119,7 @@ def _create_version_two_schema(connection: sqlite3.Connection) -> None:
 def _migrate_version_one_to_two(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE character_groups ("
-        "group_id INTEGER PRIMARY KEY, "
+        "group_id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "name TEXT NOT NULL COLLATE NOCASE UNIQUE, "
         "created_at TEXT NOT NULL)"
     )

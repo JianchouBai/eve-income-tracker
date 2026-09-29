@@ -602,6 +602,7 @@ input[type="date"] {
   list-style: none;
 }
 
+.report-column,
 .report-deck {
   display: grid;
   gap: 24px;

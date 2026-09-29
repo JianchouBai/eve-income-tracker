@@ -35,6 +35,7 @@ from app.sync import SyncService
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 logger = logging.getLogger(__name__)
+SQLITE_MAX_INTEGER = 2**63 - 1
 _EPHEMERAL_SESSION_SECRET = secrets.token_urlsafe(48)
 SAFE_SSO_ERROR_CODES = frozenset(
     {
@@ -75,6 +76,17 @@ SYNC_MESSAGES = {
 }
 
 
+def _is_persisted_id(value: int) -> bool:
+    return 1 <= value <= SQLITE_MAX_INTEGER
+
+
+def _parse_persisted_id(value: str) -> int | None:
+    if len(value) > 19 or re.fullmatch(r"[1-9][0-9]*", value) is None:
+        return None
+    parsed = int(value)
+    return parsed if _is_persisted_id(parsed) else None
+
+
 class CharacterEnabledRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
     enabled: bool
@@ -100,8 +112,8 @@ class CharacterGroupAssignmentRequest(BaseModel):
     @field_validator("group_id")
     @classmethod
     def validate_group_id(cls, value: int | None) -> int | None:
-        if value is not None and value <= 0:
-            raise ValueError("group_id must be positive")
+        if value is not None and not _is_persisted_id(value):
+            raise ValueError("group_id must be a positive signed 64-bit integer")
         return value
 
 
@@ -353,9 +365,10 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
 
     def requested_group(request: Request) -> CharacterGroupRecord:
         raw_values = request.query_params.getlist("group_id")
-        if len(raw_values) != 1 or re.fullmatch(r"[1-9][0-9]*", raw_values[0]) is None:
+        group_id = _parse_persisted_id(raw_values[0]) if len(raw_values) == 1 else None
+        if group_id is None:
             raise WebError(400, "invalid_request", "角色组参数无效。")
-        group = services.groups.get(int(raw_values[0]))
+        group = services.groups.get(group_id)
         if group is None:
             raise WebError(404, "unknown_group", "所选角色组不存在。")
         return group
@@ -373,11 +386,15 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
             )
             period = parse_date_range(start, end)
             raw_ids = request.query_params.getlist("character_id")
-            if any(re.fullmatch(r"[1-9][0-9]*", value) is None for value in raw_ids):
-                raise ValueError
+            parsed_ids = []
+            for value in raw_ids:
+                character_id = _parse_persisted_id(value)
+                if character_id is None:
+                    raise ValueError
+                parsed_ids.append(character_id)
             selected = (
-                {int(value) for value in raw_ids}
-                if raw_ids
+                set(parsed_ids)
+                if parsed_ids
                 else {record.character_id for record in records if record.enabled}
             )
         except (ValueError, OverflowError):
@@ -433,7 +450,7 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
 
     @app.patch("/api/groups/{group_id}", dependencies=[Depends(_require_csrf)])
     async def rename_group(group_id: int, payload: CharacterGroupNameRequest):
-        if group_id <= 0:
+        if not _is_persisted_id(group_id):
             raise WebError(400, "invalid_request", "角色组参数无效。")
         try:
             record = services.groups.rename(group_id, payload.name)
@@ -449,7 +466,7 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
 
     @app.delete("/api/groups/{group_id}", dependencies=[Depends(_require_csrf)])
     async def delete_group(group_id: int):
-        if group_id <= 0:
+        if not _is_persisted_id(group_id):
             raise WebError(400, "invalid_request", "角色组参数无效。")
         try:
             moved_character_ids = services.groups.delete(group_id)
@@ -464,7 +481,7 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
     async def assign_character_group(
         character_id: int, payload: CharacterGroupAssignmentRequest
     ):
-        if character_id <= 0:
+        if not _is_persisted_id(character_id):
             raise WebError(400, "invalid_request", "角色参数无效。")
         try:
             record = services.characters.set_group(character_id, payload.group_id)
@@ -539,6 +556,8 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
         "/api/characters/{character_id}/enabled", dependencies=[Depends(_require_csrf)]
     )
     async def set_enabled(character_id: int, payload: CharacterEnabledRequest):
+        if not _is_persisted_id(character_id):
+            raise WebError(400, "invalid_request", "角色参数无效。")
         record = next(
             (
                 record

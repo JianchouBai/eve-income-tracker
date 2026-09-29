@@ -164,7 +164,9 @@ def test_group_workspace_script_preserves_data_and_guides_empty_states(tmp_path)
         script = browser.get("/static/app.js").text
 
     assert "删除后，组内角色将移回未分组，钱包流水不会被删除。确定删除吗？" in script
-    assert "selectedGroupId = groups.length ? String(groups[0].group_id) : null;" in script
+    assert (
+        "selectedGroupId = groups.length ? String(groups[0].group_id) : null;" in script
+    )
     assert "先创建角色组，再把已授权角色加入组内。" in script
     assert "这个角色组还没有成员，请从下方未分组角色中添加。" in script
     assert "当前没有未分组角色。" in script
@@ -175,6 +177,32 @@ def test_group_workspace_script_preserves_data_and_guides_empty_states(tmp_path)
     assert "$('report-button').disabled = !hasGroup;" in availability
     assert "$('sync-button').disabled = !hasGroup;" in availability
     assert "$('report-deck').hidden = !hasGroup;" in availability
+
+
+def test_group_workspace_keeps_feedback_visible_without_a_group(tmp_path):
+    with client(tmp_path) as browser:
+        page = browser.get("/").text
+
+    status_position = page.index("id='status-message'")
+    report_position = page.index("id='report-deck'")
+    assert status_position < report_position
+
+
+def test_report_load_rejects_out_of_order_group_responses(tmp_path):
+    with client(tmp_path) as browser:
+        script = browser.get("/static/app.js").text
+
+    load = script.split("async function load() {", 1)[1].split(
+        "function roleStatus", 1
+    )[0]
+    assert "let reportRequestGeneration = 0;" in script
+    assert "const generation = ++reportRequestGeneration;" in load
+    assert "const requestedGroupId = selectedGroupId;" in load
+    assert "generation !== reportRequestGeneration" in load
+    assert "requestedGroupId !== selectedGroupId" in load
+    assert "$('report-deck').hidden = true;" in load
+    assert "$('report-deck').hidden = false;" in load
+    assert "正在加载当前角色组报表" in load
 
 
 def test_dashboard_chart_contract_uses_one_exact_scale_for_all_money_series(tmp_path):

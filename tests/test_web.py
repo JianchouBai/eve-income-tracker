@@ -617,6 +617,47 @@ def test_group_name_payload_validation_is_safe(context, payload):
         assert "private-extra" not in response.text
 
 
+def test_deleted_group_id_cannot_address_a_replacement_group(context):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        headers = csrf_headers(client, settings)
+        stale = client.post(
+            "/api/groups", json={"name": "Stale"}, headers=headers
+        ).json()["group"]
+        assert (
+            client.delete(
+                f"/api/groups/{stale['group_id']}", headers=headers
+            ).status_code
+            == 200
+        )
+        replacement = client.post(
+            "/api/groups", json={"name": "Replacement"}, headers=headers
+        ).json()["group"]
+
+        assert replacement["group_id"] > stale["group_id"]
+        stale_responses = [
+            client.get(f"/api/dashboard?group_id={stale['group_id']}"),
+            client.patch(
+                f"/api/groups/{stale['group_id']}",
+                json={"name": "Hijacked"},
+                headers=headers,
+            ),
+            client.post(
+                "/api/characters/101/group",
+                json={"group_id": stale["group_id"]},
+                headers=headers,
+            ),
+            client.delete(f"/api/groups/{stale['group_id']}", headers=headers),
+        ]
+        assert all(response.status_code == 404 for response in stale_responses)
+        assert all(
+            response.json()["error"]["code"] == "unknown_group"
+            for response in stale_responses
+        )
+        assert services.groups.get(replacement["group_id"]).name == "Replacement"
+
+
 def test_group_mutations_require_authentication_and_csrf(context):
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
@@ -666,6 +707,54 @@ def test_group_unknown_ids_return_safe_errors(context):
         ]
         assert all("private-" not in response.text for response in cases)
         assert all("sqlite" not in response.text.lower() for response in cases)
+
+
+def test_oversized_persisted_ids_return_safe_invalid_request(context):
+    settings, services, clock = context
+    with TestClient(
+        create_app(settings, services, clock), raise_server_exceptions=False
+    ) as client:
+        authorize(client, settings)
+        headers = csrf_headers(client, settings)
+        group = services.groups.create("Bounded IDs", clock.now_utc())
+        services.characters.set_group(101, group.group_id)
+        oversized = str(2**63)
+        excessively_long = "9" * 5000
+
+        responses = [
+            client.get(f"/api/dashboard?group_id={oversized}"),
+            client.get(
+                f"/api/entries?group_id={group.group_id}&character_id={oversized}"
+            ),
+            client.post(f"/api/sync?group_id={oversized}", headers=headers),
+            client.patch(
+                f"/api/groups/{oversized}",
+                json={"name": "Too Large"},
+                headers=headers,
+            ),
+            client.delete(f"/api/groups/{oversized}", headers=headers),
+            client.post(
+                f"/api/characters/{oversized}/group",
+                json={"group_id": None},
+                headers=headers,
+            ),
+            client.post(
+                "/api/characters/101/group",
+                json={"group_id": int(oversized)},
+                headers=headers,
+            ),
+            client.post(
+                f"/api/characters/{oversized}/enabled",
+                json={"enabled": True},
+                headers=headers,
+            ),
+            client.get(f"/api/dashboard?group_id={excessively_long}"),
+        ]
+        for response in responses:
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "invalid_request"
+            assert "sqlite" not in response.text.lower()
+            assert "private-" not in response.text
 
 
 def test_character_api_exposes_only_public_fields(context):

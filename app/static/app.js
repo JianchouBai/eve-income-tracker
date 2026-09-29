@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const csrf = document.querySelector('meta[name=csrf-token]').content;
 let report;
+let reportRequestGeneration = 0;
 let groups = [];
 let selectedGroupId = null;
 let selectedCharacterIds = new Set();
@@ -216,16 +217,29 @@ function render(data, entries) {
 }
 
 async function load() {
-  if (!selectedGroupId) return;
+  const generation = ++reportRequestGeneration;
+  const requestedGroupId = selectedGroupId;
+  if (!requestedGroupId) {
+    $('report-deck').hidden = true;
+    return;
+  }
+  $('report-deck').hidden = true;
+  $('report-deck').setAttribute('aria-busy', 'true');
+  message('正在加载当前角色组报表…');
   try {
     const parameters = query();
     const [data, entries] = await Promise.all([
       get(`/api/dashboard?${parameters}`), get(`/api/entries?${parameters}`),
     ]);
+    if (generation !== reportRequestGeneration || requestedGroupId !== selectedGroupId) return;
     render(data, entries);
+    $('report-deck').hidden = false;
     message('报表已更新。');
   } catch (error) {
+    if (generation !== reportRequestGeneration || requestedGroupId !== selectedGroupId) return;
     message(error.message || '无法加载报表，请稍后再试。', true);
+  } finally {
+    if (generation === reportRequestGeneration) $('report-deck').removeAttribute('aria-busy');
   }
 }
 
@@ -385,6 +399,7 @@ async function roles({ captureSelection = true } = {}) {
   renderGroupOptions();
   renderRoles();
   setWorkspaceAvailability();
+  if (!selectedGroupId) message('先创建角色组，再把已授权角色加入组内。');
 }
 
 function enteredGroupName() {

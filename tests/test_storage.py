@@ -269,6 +269,20 @@ def test_group_creation_rejects_non_utc_timestamp(tmp_path, created_at):
         storage.CharacterGroupRepository(database).create("Alpha", created_at)
 
 
+def test_deleted_group_id_is_never_reused(tmp_path):
+    database = Database(tmp_path / "income.sqlite3")
+    database.initialize()
+    groups = storage.CharacterGroupRepository(database)
+    created_at = datetime(2026, 9, 1, tzinfo=UTC)
+
+    deleted = groups.create("Deleted", created_at)
+    groups.delete(deleted.group_id)
+    replacement = groups.create("Replacement", created_at)
+
+    assert replacement.group_id > deleted.group_id
+    assert groups.get(deleted.group_id) is None
+
+
 def test_character_membership_reassigns_and_returns_to_ungrouped(tmp_path):
     database = Database(tmp_path / "income.sqlite3")
     database.initialize()
