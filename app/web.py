@@ -349,7 +349,13 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
     @app.get("/api/dashboard")
     async def dashboard(request: Request):
         records, selected, period, entries = report_input(request)
-        report = build_dashboard(entries, records, selected, period)
+        report = build_dashboard(
+            entries,
+            records,
+            selected,
+            period,
+            group_member_ids={record.character_id for record in records},
+        )
         return {
             "from": period.start.isoformat(),
             "to": period.end.isoformat(),
@@ -371,9 +377,10 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
     async def journal_entries(request: Request):
         records, selected, period, entries = report_input(request)
         names = {record.character_id: record.name for record in records}
+        group_member_ids = {record.character_id for record in records}
         rows = []
         for entry in entries:
-            classified = classify_entry(entry)
+            classified = classify_entry(entry, group_member_ids)
             if classified is None:
                 continue
             rows.append(

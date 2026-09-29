@@ -1,4 +1,6 @@
+import logging
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -17,6 +19,7 @@ from app.models import (
 BEIJING = ZoneInfo("Asia/Shanghai")
 UTC = timezone.utc  # noqa: UP017 - test runtime is Python 3.10.
 ZERO = Decimal(0)
+logger = logging.getLogger(__name__)
 
 INCOME_CATEGORIES = {
     "bounty_prizes": "赏金",
@@ -31,13 +34,28 @@ TAX_CATEGORIES = {
     "agent_mission_security_tax": "任务奖励",
     "agent_mission_time_bonus_reward_corporation_tax": "任务限时奖励",
 }
-CATEGORY_ORDER = tuple(INCOME_CATEGORIES.values())
+CATEGORY_ORDER = (*INCOME_CATEGORIES.values(), "玩家转账")
 
 
-def classify_entry(entry: JournalEntry) -> ClassifiedEntry | None:
+def classify_entry(
+    entry: JournalEntry, group_member_ids: AbstractSet[int]
+) -> ClassifiedEntry | None:
     category = INCOME_CATEGORIES.get(entry.ref_type)
     if category is not None and entry.amount > ZERO:
         return ClassifiedEntry(entry, "income", category, entry.amount)
+
+    if entry.ref_type == "player_donation" and entry.amount > ZERO:
+        counterpart_ids = {
+            party_id
+            for party_id in (entry.first_party_id, entry.second_party_id)
+            if party_id is not None and party_id != entry.character_id
+        }
+        if not counterpart_ids:
+            logger.warning("Ignoring player_donation without identifiable counterpart")
+            return None
+        if counterpart_ids & group_member_ids:
+            return None
+        return ClassifiedEntry(entry, "income", "玩家转账", entry.amount)
 
     category = TAX_CATEGORIES.get(entry.ref_type)
     if category is not None and entry.amount < ZERO:
@@ -63,6 +81,8 @@ def build_dashboard(
     characters: Sequence[CharacterRecord],
     selected_ids: set[int] | None,
     period: DateRange,
+    *,
+    group_member_ids: AbstractSet[int],
 ) -> DashboardReport:
     character_by_id = {character.character_id: character for character in characters}
     selected = (
@@ -85,7 +105,7 @@ def build_dashboard(
             continue
         if not period.start_utc <= entry.date_utc < period.end_utc_exclusive:
             continue
-        classified = classify_entry(entry)
+        classified = classify_entry(entry, group_member_ids)
         if classified is None:
             continue
         day = entry.date_utc.astimezone(BEIJING).date()
