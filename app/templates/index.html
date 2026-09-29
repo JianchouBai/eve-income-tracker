@@ -8,18 +8,149 @@
   <link rel='stylesheet' href='/static/app.css'>
 </head>
 <body data-authenticated='{{ authenticated|lower }}'>
-  <main class='shell'>
-    <header class='masthead'><div><p class='eyebrow'>WALLET / ISK</p><h1>EVE 每日收益</h1><p>只读权限 <code>esi-wallet.read_character_wallet.v1</code>。按北京时间自然日统计；首次授权前的历史不会纳入。</p></div>{% if configuration_issues %}<span id='add-role-link' class='button'>完成配置后可登录</span>{% else %}<a id='add-role-link' class='button' href='/auth/login'>{{ '添加角色' if authenticated else '登录 EVE' }}</a>{% endif %}</header>
-    {% if configuration_issues %}<section class='notice error'><h2>需要配置</h2><p>请配置后再连接 EVE；本应用仅读取角色钱包流水。</p><ul>{% for name in configuration_issues %}<li>{{ name }}</li>{% endfor %}</ul></section>{% endif %}
-    <section id='dashboard' {% if not authenticated %}hidden{% endif %}>
-      <form id='role-filters' class='filters'><fieldset><legend>角色与日期</legend><div id='enable-region' aria-live='polite'>正在加载角色…</div><label>开始 <input id='date-from' type='date'></label><label>结束 <input id='date-to' type='date'></label><button type='submit'>更新报表</button><button id='sync-button' type='button'>同步数据</button><a id='reauthorize-link' href='{{ '/auth/login' if not configuration_issues else '#' }}'>重新授权 / 添加角色</a></fieldset></form>
-      <p id='status-message' class='notice' role='status'>正在加载报表…</p>
-      <section id='sync-results' class='panel' aria-live='polite'><h2>同步状态</h2><p>尚未同步。</p></section>
-      <section class='summary-grid' aria-label='汇总'><article><p>到账收入</p><strong id='summary-income'>—</strong></article><article><p>已交税费</p><strong id='summary-tax'>—</strong></article><article><p>税后收入</p><strong id='summary-net'>—</strong></article></section>
-      <section class='panel'><h2>近 30 日趋势</h2><canvas id='trend-canvas' role='img' aria-label='收入、税费和税后收入趋势图'>收入趋势图：图表不可用时请查看下方连续日表。</canvas><p id='trend-fallback' class='chart-fallback'>图表不可用时请查看下方连续日表。</p></section>
-      <section class='breakdowns'><section id='category-breakdown' class='panel'><h2>类型分项</h2><p>暂无数据</p></section><section id='character-breakdown' class='panel'><h2>角色分项</h2><p>暂无数据</p></section></section>
-      <section class='panel'><h2>每日明细</h2><div class='scroll'><table id='daily-table'><thead><tr><th>北京时间日期</th><th>到账</th><th>税费</th><th>税后</th></tr></thead><tbody></tbody></table></div></section>
-      <details id='entry-details' class='panel'><summary>已纳入流水明细</summary><div class='scroll'><table><thead><tr><th>日期</th><th>角色</th><th>类型</th><th>金额</th><th>说明</th></tr></thead><tbody></tbody></table></div></details>
+  <main class='shell' aria-labelledby='page-title'>
+    <header class='masthead'>
+      <div class='brand-lockup'>
+        <svg class='orbit-mark' viewBox='0 0 72 72' aria-hidden='true'>
+          <circle cx='36' cy='36' r='8'></circle>
+          <ellipse cx='36' cy='36' rx='30' ry='14' transform='rotate(-28 36 36)'></ellipse>
+          <circle class='orbit-node' cx='61' cy='22' r='3'></circle>
+        </svg>
+        <div>
+          <p class='context-line'>舰长个人账本 · 北京时间</p>
+          <h1 id='page-title'>EVE 每日收益</h1>
+          <p class='lede'>读取角色钱包流水，记录每个自然日真正落袋的 ISK。只读权限 <code>esi-wallet.read_character_wallet.v1</code>；首次授权前的历史不会纳入。</p>
+        </div>
+      </div>
+      <div class='masthead-action'>
+        <span class='system-state'><i aria-hidden='true'></i>本地只读监控</span>
+        {% if configuration_issues %}
+        <span id='add-role-link' class='button button-disabled'>完成配置后可登录</span>
+        {% else %}
+        <a id='add-role-link' class='button button-primary' href='/auth/login'>{{ '添加角色' if authenticated else '登录 EVE' }}</a>
+        {% endif %}
+      </div>
+    </header>
+
+    {% if configuration_issues %}
+    <section class='notice error configuration-notice'>
+      <div>
+        <h2>完成本地配置后启航</h2>
+        <p>请配置以下项目后再连接 EVE；应用只会读取角色钱包流水。</p>
+      </div>
+      <ul>{% for name in configuration_issues %}<li><code>{{ name }}</code></li>{% endfor %}</ul>
     </section>
-  </main><script src='/static/app.js' defer></script>
-</body></html>
+    {% endif %}
+
+    {% if not authenticated and not configuration_issues %}
+    <section class='welcome-panel' aria-label='开始使用'>
+      <p>完成一次 EVE SSO 授权，从授权时刻开始建立属于你的长期收益账本。</p>
+      <span>不读取资产，不修改游戏数据，不回填授权前流水。</span>
+    </section>
+    {% endif %}
+
+    <section id='dashboard' {% if not authenticated %}hidden{% endif %}>
+      <div class='dashboard-grid'>
+        <aside class='command-rail' aria-label='角色与日期控制'>
+          <div class='rail-heading'>
+            <span class='section-index'>监控台</span>
+            <h2>报表范围</h2>
+            <p>选择角色和北京时间日期，再生成同一口径的收益视图。</p>
+          </div>
+
+          <form id='role-filters' class='filters'>
+            <fieldset>
+              <legend>角色</legend>
+              <div id='enable-region' aria-live='polite'>正在加载角色…</div>
+            </fieldset>
+            <fieldset>
+              <legend>日期范围</legend>
+              <div class='date-grid'>
+                <label>开始日期<input id='date-from' type='date'></label>
+                <label>结束日期<input id='date-to' type='date'></label>
+              </div>
+            </fieldset>
+            <div class='filter-actions'>
+              <button class='button button-secondary' type='submit'>更新报表</button>
+              <button id='sync-button' class='button button-primary' type='button'>同步钱包流水</button>
+            </div>
+            <a id='reauthorize-link' class='rail-link' href='{{ '/auth/login' if not configuration_issues else '#' }}'>重新授权或添加角色</a>
+          </form>
+
+          <section id='sync-results' class='sync-panel' aria-live='polite'>
+            <h2>同步记录</h2>
+            <p>尚未同步。</p>
+          </section>
+        </aside>
+
+        <div class='report-deck'>
+          <p id='status-message' class='notice status-bar' role='status'>正在加载报表…</p>
+
+          <section class='summary-ledger' aria-label='收益汇总'>
+            <article class='net-reading'>
+              <p>所选区间税后收入</p>
+              <strong id='summary-net'>—</strong>
+              <span>到账减去已交税费</span>
+            </article>
+            <div class='secondary-readings'>
+              <article>
+                <p>到账收入</p>
+                <strong id='summary-income'>—</strong>
+              </article>
+              <article class='tax-reading'>
+                <p>已交税费</p>
+                <strong id='summary-tax'>—</strong>
+              </article>
+            </div>
+          </section>
+
+          <section class='panel telemetry-panel' aria-labelledby='trend-title'>
+            <div class='panel-heading'>
+              <div>
+                <span class='section-index'>资金轨迹</span>
+                <h2 id='trend-title'>近 30 日趋势</h2>
+              </div>
+              <ul id='trend-legend' class='chart-legend' aria-label='图表图例'>
+                <li><i class='legend-income' aria-hidden='true'></i>到账收入</li>
+                <li><i class='legend-tax' aria-hidden='true'></i>已交税费</li>
+                <li><i class='legend-net' aria-hidden='true'></i>税后收入</li>
+              </ul>
+            </div>
+            <canvas id='trend-canvas' role='img' aria-label='收入、税费和税后收入趋势图' aria-describedby='trend-legend trend-fallback'>收入趋势图：图表不可用时请查看下方连续日表。</canvas>
+            <p id='trend-fallback' class='chart-fallback'>图表不可用时请查看下方连续日表。</p>
+          </section>
+
+          <section class='breakdowns' aria-label='收益分项'>
+            <section id='category-breakdown' class='panel breakdown-panel'><span class='section-index'>来源</span><h2>类型分项</h2><p>暂无数据</p></section>
+            <section id='character-breakdown' class='panel breakdown-panel'><span class='section-index'>舰长</span><h2>角色分项</h2><p>暂无数据</p></section>
+          </section>
+
+          <section class='panel table-panel' aria-labelledby='daily-title'>
+            <div class='panel-heading'>
+              <div><span class='section-index'>逐日账本</span><h2 id='daily-title'>每日明细</h2></div>
+              <p>全部日期按北京时间归档</p>
+            </div>
+            <div class='scroll'>
+              <table id='daily-table'>
+                <thead><tr><th>北京时间日期</th><th>到账</th><th>税费</th><th>税后</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <details id='entry-details' class='panel entry-panel'>
+            <summary><span>已纳入流水明细</span><small>用于与游戏钱包逐条核对</small></summary>
+            <div class='scroll'>
+              <table>
+                <thead><tr><th>日期</th><th>角色</th><th>类型</th><th>金额</th><th>说明</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src='/static/app.js' defer></script>
+</body>
+</html>

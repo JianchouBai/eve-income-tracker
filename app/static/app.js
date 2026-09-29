@@ -43,7 +43,7 @@ async function get(path) {
 function message(text, error = false) {
   const element = $('status-message');
   element.textContent = text;
-  element.className = `notice${error ? ' error' : ''}`;
+  element.className = `notice status-bar${error ? ' error' : ''}`;
 }
 
 function rows(target, items, columns) {
@@ -61,9 +61,12 @@ function rows(target, items, columns) {
 
 function breakdown(target, title, items, label) {
   target.replaceChildren();
+  const marker = document.createElement('span');
+  marker.className = 'section-index';
+  marker.textContent = title === '类型分项' ? '来源' : '舰长';
   const heading = document.createElement('h2');
   heading.textContent = title;
-  target.append(heading);
+  target.append(marker, heading);
   if (!items.length) {
     const empty = document.createElement('p');
     empty.textContent = '暂无数据';
@@ -113,15 +116,22 @@ function normalizedRatios(days, key, chart) {
 
 function drawSeries(context, ratios, color, width, height) {
   if (!ratios.length) return;
+  const left = 10;
+  const right = width - 10;
+  const top = 16;
+  const bottom = height - 30;
+  const center = top + ((bottom - top) / 2);
   context.beginPath();
   ratios.forEach((ratio, index) => {
-    const x = ratios.length === 1 ? width / 2 : (index / (ratios.length - 1)) * width;
-    const y = height / 2 - ratio * ((height / 2) - 12);
+    const x = ratios.length === 1 ? width / 2 : left + ((index / (ratios.length - 1)) * (right - left));
+    const y = center - ratio * ((bottom - top) / 2);
     if (index === 0) context.moveTo(x, y);
     else context.lineTo(x, y);
   });
   context.strokeStyle = color;
-  context.lineWidth = 2;
+  context.lineWidth = color === '#e6eef2' ? 2.4 : 1.6;
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
   context.stroke();
 }
 
@@ -131,22 +141,45 @@ function draw(days) {
   const ctx = canvas.getContext('2d');
   if (!ctx) {
     fallback.textContent = '图表不可用；请查看下方每日明细表中的收入、税费和税后收入。';
+    fallback.classList.add('chart-fallback-visible');
     return;
   }
-  const width = canvas.clientWidth * devicePixelRatio;
-  const height = canvas.clientHeight * devicePixelRatio;
-  canvas.width = width;
-  canvas.height = height;
+  fallback.classList.remove('chart-fallback-visible');
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, width, height);
-  ctx.strokeStyle = '#2a3b4c';
-  ctx.beginPath();
-  ctx.moveTo(0, height / 2);
-  ctx.lineTo(width, height / 2);
-  ctx.stroke();
+  ctx.font = '11px "Microsoft YaHei UI", sans-serif';
+  ctx.fillStyle = 'rgba(230, 238, 242, 0.42)';
+  ctx.textBaseline = 'bottom';
+  ctx.setLineDash([3, 7]);
+  [16, height / 2 - 7, height - 30].forEach((y, index) => {
+    ctx.beginPath();
+    ctx.moveTo(10, y);
+    ctx.lineTo(width - 10, y);
+    ctx.strokeStyle = index === 1 ? 'rgba(114, 214, 207, 0.28)' : 'rgba(41, 64, 77, 0.72)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  if (days.length) {
+    const labelStep = Math.max(1, Math.ceil((days.length - 1) / 4));
+    days.forEach((day, index) => {
+      if (index % labelStep !== 0 && index !== days.length - 1) return;
+      const x = days.length === 1 ? width / 2 : 10 + ((index / (days.length - 1)) * (width - 20));
+      ctx.textAlign = index === 0 ? 'left' : (index === days.length - 1 ? 'right' : 'center');
+      ctx.fillText(day.date.slice(5), x, height - 5);
+    });
+  }
+
   const chart = chartScale(days);
-  drawSeries(ctx, normalizedRatios(days, 'income', chart), '#61d7e8', width, height);
-  drawSeries(ctx, normalizedRatios(days, 'tax', chart), '#f6bc62', width, height);
-  drawSeries(ctx, normalizedRatios(days, 'net', chart), '#d8e5ef', width, height);
+  drawSeries(ctx, normalizedRatios(days, 'income', chart), '#72d6cf', width, height);
+  drawSeries(ctx, normalizedRatios(days, 'tax', chart), '#e9a95f', width, height);
+  drawSeries(ctx, normalizedRatios(days, 'net', chart), '#e6eef2', width, height);
   canvas.setAttribute('aria-label', '收入（青色）、税费（琥珀色）和税后收入（白色）趋势图；下方每日明细表提供等价文本数据。');
   fallback.textContent = `图表文本降级：${days.map((day) => `${day.date}，到账 ${isk(day.income)}，税费 ${isk(day.tax)}，税后 ${isk(day.net)}`).join('；') || '暂无数据。'}`;
 }

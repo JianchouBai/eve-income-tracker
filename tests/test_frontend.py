@@ -60,6 +60,17 @@ def test_dashboard_shell_contains_semantic_regions_and_local_assets(tmp_path):
     assert "http://" not in page.text
 
 
+def test_dashboard_exposes_financial_hierarchy_and_chart_legend(tmp_path):
+    with client(tmp_path) as browser:
+        page = browser.get("/").text
+
+    assert "id='page-title'" in page
+    assert "<aside class='command-rail' aria-label='角色与日期控制'>" in page
+    assert "<section class='summary-ledger' aria-label='收益汇总'>" in page
+    assert "aria-describedby='trend-legend trend-fallback'" in page
+    assert "id='trend-legend'" in page
+
+
 def test_dashboard_script_contract_covers_enable_sync_status_decimal_details_and_canvas_fallback(
     tmp_path,
 ):
