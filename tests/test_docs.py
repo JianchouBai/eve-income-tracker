@@ -90,7 +90,7 @@ def test_readme_contains_machine_operational_setup_contract():
     [
         ("添加角色", "每个角色", "分别", "合计"),
         ("首次授权", "精确时刻", "之前", "丢弃", "重新授权"),
-        ("北京时间", "Asia/Shanghai", "366", "同步数据", "停用"),
+        ("北京时间", "Asia/Shanghai", "366", "同步钱包流水", "停用"),
         ("127.0.0.1", "HTTPS", "Secure", "只读", "Client Secret"),
         ("备份", "APP_ENCRYPTION_KEY", "丢失", "真实登录", "自己的"),
     ],
@@ -98,6 +98,23 @@ def test_readme_contains_machine_operational_setup_contract():
 def test_readme_covers_binding_product_and_security_statements(required_terms):
     readme = read_readme()
     assert all(term in readme for term in required_terms)
+
+
+def test_readme_documents_grouped_player_donation_operating_model():
+    readme = read_readme()
+    for statement in [
+        "创建角色组并为它命名",
+        "新授权角色起初处于未分组",
+        "每个角色最多只能属于一个角色组",
+        "按当前角色组手动同步",
+        "`player_donation`",
+        "`玩家转账`",
+        "同一角色组内的角色相互转账不计入收入",
+        "`player_trading`",
+        "市场交易收入暂不统计",
+        "删除角色组不会删除角色、授权或钱包历史",
+    ]:
+        assert statement in readme
 
 
 @pytest.mark.parametrize(
