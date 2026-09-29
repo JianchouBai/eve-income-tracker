@@ -14,16 +14,23 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import Settings
 from app.esi import EsiError
-from app.models import CharacterRecord
+from app.models import CharacterGroupRecord, CharacterRecord
 from app.reporting import BEIJING, build_dashboard, classify_entry, parse_date_range
 from app.security import TokenCipher
 from app.sso import SsoClient, SsoError
-from app.storage import CharacterRepository, JournalRepository
+from app.storage import (
+    CharacterGroupRepository,
+    CharacterRepository,
+    GroupNameConflictError,
+    JournalRepository,
+    UnknownCharacterError,
+    UnknownGroupError,
+)
 from app.sync import SyncService
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -73,9 +80,35 @@ class CharacterEnabledRequest(BaseModel):
     enabled: bool
 
 
+class CharacterGroupNameRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not 1 <= len(normalized) <= 50:
+            raise ValueError("group name must contain 1 to 50 characters")
+        return normalized
+
+
+class CharacterGroupAssignmentRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    group_id: int | None
+
+    @field_validator("group_id")
+    @classmethod
+    def validate_group_id(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("group_id must be positive")
+        return value
+
+
 @dataclass
 class AppServices:
     characters: CharacterRepository
+    groups: CharacterGroupRepository
     journal: JournalRepository
     cipher: TokenCipher | None
     sso: SsoClient | None
@@ -150,6 +183,16 @@ def _public_character(record: CharacterRecord) -> dict:
         "last_synced_at": record.last_synced_at.isoformat()
         if record.last_synced_at
         else None,
+        "group_id": record.group_id,
+    }
+
+
+def _public_group(record: CharacterGroupRecord, member_count: int) -> dict:
+    return {
+        "group_id": record.group_id,
+        "name": record.name,
+        "created_at": record.created_at.isoformat(),
+        "member_count": member_count,
     }
 
 
@@ -308,9 +351,20 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
         request.session.clear()
         return RedirectResponse("/", status_code=302)
 
+    def requested_group(request: Request) -> CharacterGroupRecord:
+        raw_values = request.query_params.getlist("group_id")
+        if len(raw_values) != 1 or re.fullmatch(r"[1-9][0-9]*", raw_values[0]) is None:
+            raise WebError(400, "invalid_request", "角色组参数无效。")
+        group = services.groups.get(int(raw_values[0]))
+        if group is None:
+            raise WebError(404, "unknown_group", "所选角色组不存在。")
+        return group
+
     def report_input(request: Request):
         _require_viewer(request)
-        records = services.characters.list_all()
+        group = requested_group(request)
+        records = services.characters.list_for_group(group.group_id)
+        member_ids = {record.character_id for record in records}
         try:
             today = clock.now_utc().astimezone(BEIJING).date()
             end = _date_param(request.query_params.get("to"), today)
@@ -330,12 +384,16 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
             raise WebError(
                 400, "invalid_request", "日期或角色参数无效，日期范围最多为 366 天。"
             ) from None
-        if selected - {record.character_id for record in records}:
-            raise WebError(400, "unknown_character", "所选角色不存在。")
+        if selected - member_ids:
+            raise WebError(
+                400,
+                "character_not_in_group",
+                "所选角色不属于当前角色组。",
+            )
         entries = services.journal.list_for_report(
             selected, period.start_utc, period.end_utc_exclusive
         )
-        return records, selected, period, entries
+        return group, records, member_ids, selected, period, entries
 
     @app.get("/api/characters")
     async def characters(request: Request):
@@ -346,17 +404,89 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
             ]
         }
 
+    @app.get("/api/groups")
+    async def groups(request: Request):
+        _require_viewer(request)
+        characters = services.characters.list_all()
+        counts: dict[int, int] = {}
+        ungrouped_count = 0
+        for record in characters:
+            if record.group_id is None:
+                ungrouped_count += 1
+            else:
+                counts[record.group_id] = counts.get(record.group_id, 0) + 1
+        return {
+            "groups": [
+                _public_group(record, counts.get(record.group_id, 0))
+                for record in services.groups.list_all()
+            ],
+            "ungrouped_count": ungrouped_count,
+        }
+
+    @app.post("/api/groups", status_code=201, dependencies=[Depends(_require_csrf)])
+    async def create_group(payload: CharacterGroupNameRequest):
+        try:
+            record = services.groups.create(payload.name, clock.now_utc())
+        except GroupNameConflictError:
+            raise WebError(400, "group_name_conflict", "角色组名称已存在。") from None
+        return {"group": _public_group(record, 0)}
+
+    @app.patch("/api/groups/{group_id}", dependencies=[Depends(_require_csrf)])
+    async def rename_group(group_id: int, payload: CharacterGroupNameRequest):
+        if group_id <= 0:
+            raise WebError(400, "invalid_request", "角色组参数无效。")
+        try:
+            record = services.groups.rename(group_id, payload.name)
+        except GroupNameConflictError:
+            raise WebError(400, "group_name_conflict", "角色组名称已存在。") from None
+        except UnknownGroupError:
+            raise WebError(404, "unknown_group", "所选角色组不存在。") from None
+        return {
+            "group": _public_group(
+                record, len(services.characters.list_for_group(group_id))
+            )
+        }
+
+    @app.delete("/api/groups/{group_id}", dependencies=[Depends(_require_csrf)])
+    async def delete_group(group_id: int):
+        if group_id <= 0:
+            raise WebError(400, "invalid_request", "角色组参数无效。")
+        try:
+            moved_character_ids = services.groups.delete(group_id)
+        except UnknownGroupError:
+            raise WebError(404, "unknown_group", "所选角色组不存在。") from None
+        return {"moved_character_ids": list(moved_character_ids)}
+
+    @app.post(
+        "/api/characters/{character_id}/group",
+        dependencies=[Depends(_require_csrf)],
+    )
+    async def assign_character_group(
+        character_id: int, payload: CharacterGroupAssignmentRequest
+    ):
+        if character_id <= 0:
+            raise WebError(400, "invalid_request", "角色参数无效。")
+        try:
+            record = services.characters.set_group(character_id, payload.group_id)
+        except UnknownCharacterError:
+            raise WebError(404, "unknown_character", "所选角色不存在。") from None
+        except UnknownGroupError:
+            raise WebError(404, "unknown_group", "所选角色组不存在。") from None
+        return {"character": _public_character(record)}
+
     @app.get("/api/dashboard")
     async def dashboard(request: Request):
-        records, selected, period, entries = report_input(request)
+        group, records, member_ids, selected, period, entries = report_input(request)
         report = build_dashboard(
             entries,
             records,
             selected,
             period,
-            group_member_ids={record.character_id for record in records},
+            group_member_ids=member_ids,
         )
         return {
+            "group_id": group.group_id,
+            "group_name": group.name,
             "from": period.start.isoformat(),
             "to": period.end.isoformat(),
             "selected_ids": sorted(report.selected_ids),
@@ -375,12 +505,11 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
 
     @app.get("/api/entries")
     async def journal_entries(request: Request):
-        records, selected, period, entries = report_input(request)
+        group, records, member_ids, selected, period, entries = report_input(request)
         names = {record.character_id: record.name for record in records}
-        group_member_ids = {record.character_id for record in records}
         rows = []
         for entry in entries:
-            classified = classify_entry(entry, group_member_ids)
+            classified = classify_entry(entry, member_ids)
             if classified is None:
                 continue
             rows.append(
@@ -398,6 +527,8 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
                 }
             )
         return {
+            "group_id": group.group_id,
+            "group_name": group.name,
             "from": period.start.isoformat(),
             "to": period.end.isoformat(),
             "selected_ids": sorted(selected),
@@ -422,11 +553,12 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
         return {"character": {**_public_character(record), "enabled": payload.enabled}}
 
     @app.post("/api/sync", dependencies=[Depends(_require_csrf)])
-    async def synchronize():
+    async def synchronize(request: Request):
+        group = requested_group(request)
         if issues or services.sync is None:
             raise WebError(503, "configuration_required", "请先完成应用配置。")
         try:
-            result = await services.sync.sync_enabled()
+            result = await services.sync.sync_group(group.group_id)
         except Exception as error:  # noqa: BLE001 - external service boundary.
             code = (
                 error.code if isinstance(error, (EsiError, SsoError)) else "sync_failed"

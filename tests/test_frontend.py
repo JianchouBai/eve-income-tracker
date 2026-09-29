@@ -3,14 +3,24 @@ import re
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.storage import CharacterRepository, Database, JournalRepository
+from app.storage import (
+    CharacterGroupRepository,
+    CharacterRepository,
+    Database,
+    JournalRepository,
+)
 from app.web import AppServices, Clock, create_app
 
 
 def client(tmp_path):
     database = Database(tmp_path / "income.sqlite3")
     services = AppServices(
-        CharacterRepository(database), JournalRepository(database), None, None, None
+        CharacterRepository(database),
+        CharacterGroupRepository(database),
+        JournalRepository(database),
+        None,
+        None,
+        None,
     )
     settings = Settings(_env_file=None)
     return TestClient(create_app(settings, services, Clock()))

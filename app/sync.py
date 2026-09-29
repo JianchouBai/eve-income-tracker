@@ -93,13 +93,6 @@ class SyncService:
         except Exception:  # noqa: BLE001 - sync is a sanitized service boundary.
             return SyncResult(character_id, 0, self._clock(), "failed", "sync_failed")
 
-    async def sync_enabled(self) -> SyncAllResult:
-        results = []
-        for record in self._characters.list_all():
-            if record.enabled:
-                results.append(await self.sync_character(record.character_id))
-        return SyncAllResult(tuple(results))
-
     async def sync_group(self, group_id: int) -> SyncAllResult:
         results = []
         for record in self._characters.list_for_group(group_id):

@@ -7,7 +7,12 @@ from app.config import PROJECT_ROOT, Settings
 from app.esi import EsiClient
 from app.security import TokenCipher
 from app.sso import SsoClient
-from app.storage import CharacterRepository, Database, JournalRepository
+from app.storage import (
+    CharacterGroupRepository,
+    CharacterRepository,
+    Database,
+    JournalRepository,
+)
 from app.sync import SyncService
 from app.web import AppServices, Clock, create_app
 
@@ -19,8 +24,9 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         settings.database_path or PROJECT_ROOT / "data/eve_income.sqlite3"
     )
     characters = CharacterRepository(database)
+    groups = CharacterGroupRepository(database)
     journal = JournalRepository(database)
-    services = AppServices(characters, journal, None, None, None)
+    services = AppServices(characters, groups, journal, None, None, None)
     http = None
     if not settings.configuration_issues():
         http = httpx.AsyncClient()

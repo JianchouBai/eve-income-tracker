@@ -15,7 +15,12 @@ from app.esi import EsiDataError, EsiError
 from app.models import JournalEntry
 from app.security import TokenCipher
 from app.sso import CharacterIdentity, SsoError, TokenSet
-from app.storage import CharacterRepository, Database, JournalRepository
+from app.storage import (
+    CharacterGroupRepository,
+    CharacterRepository,
+    Database,
+    JournalRepository,
+)
 from app.sync import SyncAllResult, SyncResult
 from app.web import AppServices, create_app
 
@@ -77,7 +82,8 @@ class FakeSync:
             raise RuntimeError("private-sync-token")
         return SyncResult(character_id, 0, self.clock.now_utc(), "ok", None)
 
-    async def sync_enabled(self):
+    async def sync_group(self, group_id):
+        self.calls.append(("group", group_id))
         if isinstance(self.fail, Exception):
             raise self.fail
         if self.fail:
@@ -100,6 +106,7 @@ def context(tmp_path):
     clock = FakeClock()
     services = AppServices(
         CharacterRepository(database),
+        CharacterGroupRepository(database),
         JournalRepository(database),
         TokenCipher(settings.app_encryption_key),
         FakeSso(clock),
@@ -209,6 +216,12 @@ def authorize(client, settings, **extra):
     )
 
 
+def csrf_headers(client, settings):
+    return {
+        "X-CSRF-Token": session_data(client, settings.app_session_secret)["csrf_token"]
+    }
+
+
 @pytest.mark.parametrize("state", [None, "", "wrong", "非匹配状态"])
 def test_invalid_callback_state_cannot_exchange_or_persist(context, state):
     settings, services, clock = context
@@ -254,6 +267,8 @@ def test_adding_character_and_reauthorizing_preserves_original_tracking_start(co
     started = clock.now_utc()
     with TestClient(create_app(settings, services, clock)) as client:
         assert authorize(client, settings).status_code == 302
+        group = services.groups.create("Reauthorization Group", clock.now_utc())
+        services.characters.set_group(101, group.group_id)
         services.sso.identity = CharacterIdentity(
             202, "Second Pilot", ("esi-wallet.read_character_wallet.v1",)
         )
@@ -266,6 +281,7 @@ def test_adding_character_and_reauthorizing_preserves_original_tracking_start(co
         first, second = services.characters.list_all()
         assert first.character_id == 101 and second.character_id == 202
         assert first.name == "Renamed Pilot"
+        assert first.group_id == group.group_id
         assert first.tracking_started_at == started
         assert (
             services.cipher.decrypt(first.encrypted_refresh_token)
@@ -417,6 +433,9 @@ def seed_reports(services, clock):
         clock.now_utc(),
     )
     services.characters.set_enabled(202, False)
+    group = services.groups.create("Main Group", clock.now_utc())
+    services.characters.set_group(101, group.group_id)
+    services.characters.set_group(202, group.group_id)
     services.journal.commit_sync_batch(
         101,
         [
@@ -471,15 +490,182 @@ def seed_reports(services, clock):
         ],
         clock.now_utc(),
     )
+    return group.group_id
 
 
-@pytest.mark.parametrize("route", ["/api/characters", "/api/dashboard", "/api/entries"])
+@pytest.mark.parametrize(
+    "route", ["/api/characters", "/api/groups", "/api/dashboard", "/api/entries"]
+)
 def test_read_api_requires_viewer_authentication(context, route):
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         response = client.get(route)
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "authentication_required"
+
+
+def test_group_crud_membership_counts_and_delete_preserve_data(context):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        services.journal.commit_sync_batch(
+            101,
+            [
+                JournalEntry(
+                    77,
+                    101,
+                    clock.now_utc(),
+                    Decimal("5.25"),
+                    "bounty_prizes",
+                    description="private-wallet-description",
+                )
+            ],
+            clock.now_utc(),
+        )
+        headers = csrf_headers(client, settings)
+
+        assert client.get("/api/groups").json() == {
+            "groups": [],
+            "ungrouped_count": 1,
+        }
+        first_response = client.post(
+            "/api/groups", json={"name": " Alpha "}, headers=headers
+        )
+        assert first_response.status_code == 201
+        first = first_response.json()["group"]
+        assert first["name"] == "Alpha"
+        assert first["member_count"] == 0
+        assert datetime.fromisoformat(first["created_at"]).tzinfo is not None
+        second = client.post(
+            "/api/groups", json={"name": "Second"}, headers=headers
+        ).json()["group"]
+        duplicate = client.post("/api/groups", json={"name": "alpha"}, headers=headers)
+        assert duplicate.status_code == 400
+        assert duplicate.json()["error"]["code"] == "group_name_conflict"
+
+        listed = client.get("/api/groups").json()
+        assert [group["group_id"] for group in listed["groups"]] == [
+            first["group_id"],
+            second["group_id"],
+        ]
+        assert [group["member_count"] for group in listed["groups"]] == [0, 0]
+        assert listed["ungrouped_count"] == 1
+
+        assigned = client.post(
+            "/api/characters/101/group",
+            json={"group_id": first["group_id"]},
+            headers=headers,
+        )
+        assert assigned.status_code == 200
+        assert assigned.json()["character"]["group_id"] == first["group_id"]
+        moved = client.post(
+            "/api/characters/101/group",
+            json={"group_id": second["group_id"]},
+            headers=headers,
+        )
+        assert moved.json()["character"]["group_id"] == second["group_id"]
+        assert [
+            group["member_count"]
+            for group in client.get("/api/groups").json()["groups"]
+        ] == [0, 1]
+
+        renamed = client.patch(
+            f"/api/groups/{second['group_id']}",
+            json={"name": "  PVE 主队  "},
+            headers=headers,
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["group"]["name"] == "PVE 主队"
+        deleted = client.delete(f"/api/groups/{second['group_id']}", headers=headers)
+        assert deleted.status_code == 200
+        assert deleted.json()["moved_character_ids"] == [101]
+
+        (character,) = services.characters.list_all()
+        assert character.group_id is None
+        assert character.encrypted_refresh_token != "private-refresh"
+        assert (
+            services.journal.list_for_report(
+                {101},
+                clock.now_utc() - timedelta(days=1),
+                clock.now_utc() + timedelta(days=1),
+            )[0].description
+            == "private-wallet-description"
+        )
+        assert "private-wallet-description" not in deleted.text
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"name": ""},
+        {"name": "   "},
+        {"name": "x" * 51},
+        {"name": 123},
+        {"name": "Valid", "extra": "private-extra"},
+    ],
+)
+def test_group_name_payload_validation_is_safe(context, payload):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        response = client.post(
+            "/api/groups", json=payload, headers=csrf_headers(client, settings)
+        )
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request"
+        assert "private-extra" not in response.text
+
+
+def test_group_mutations_require_authentication_and_csrf(context):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        group = services.groups.create("Alpha", clock.now_utc())
+        services.characters.upsert_authorization(
+            101, "Pilot", "private-token", clock.now_utc()
+        )
+        mutations = [
+            ("POST", "/api/groups", {"name": "Second"}),
+            ("PATCH", f"/api/groups/{group.group_id}", {"name": "Renamed"}),
+            ("DELETE", f"/api/groups/{group.group_id}", None),
+            ("POST", "/api/characters/101/group", {"group_id": group.group_id}),
+        ]
+        for method, route, payload in mutations:
+            assert client.request(method, route, json=payload).status_code == 401
+        authorize(client, settings)
+        for method, route, payload in mutations:
+            response = client.request(method, route, json=payload)
+            assert response.status_code == 403
+            assert response.json()["error"]["code"] == "csrf_failed"
+
+
+def test_group_unknown_ids_return_safe_errors(context):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        headers = csrf_headers(client, settings)
+        services.characters.upsert_authorization(
+            101, "Pilot", "private-character-token", clock.now_utc()
+        )
+        cases = [
+            client.patch("/api/groups/999", json={"name": "Missing"}, headers=headers),
+            client.delete("/api/groups/999", headers=headers),
+            client.post(
+                "/api/characters/101/group", json={"group_id": 999}, headers=headers
+            ),
+            client.post(
+                "/api/characters/999/group", json={"group_id": None}, headers=headers
+            ),
+        ]
+        assert [response.status_code for response in cases] == [404, 404, 404, 404]
+        assert [response.json()["error"]["code"] for response in cases] == [
+            "unknown_group",
+            "unknown_group",
+            "unknown_group",
+            "unknown_character",
+        ]
+        assert all("private-" not in response.text for response in cases)
+        assert all("sqlite" not in response.text.lower() for response in cases)
 
 
 def test_character_api_exposes_only_public_fields(context):
@@ -499,6 +685,7 @@ def test_character_api_exposes_only_public_fields(context):
             "authorization_required",
             "tracking_started_at",
             "last_synced_at",
+            "group_id",
         }
         assert rows[1]["authorization_required"] is True
         assert "private-" not in response.text
@@ -509,10 +696,11 @@ def test_dashboard_defaults_to_latest_thirty_beijing_days_and_enabled_roles(cont
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
-        seed_reports(services, clock)
-        response = client.get("/api/dashboard")
+        group_id = seed_reports(services, clock)
+        response = client.get(f"/api/dashboard?group_id={group_id}")
         assert response.status_code == 200
         report = response.json()
+        assert (report["group_id"], report["group_name"]) == (group_id, "Main Group")
         assert (report["from"], report["to"]) == ("2026-08-31", "2026-09-29")
         assert report["selected_ids"] == [101]
         assert (report["income"], report["tax"], report["net"]) == (
@@ -537,9 +725,10 @@ def test_repeated_character_selection_includes_disabled_and_continuous_inclusive
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
-        seed_reports(services, clock)
+        group_id = seed_reports(services, clock)
         report = client.get(
-            "/api/dashboard?from=2026-09-28&to=2026-09-29&character_id=101&character_id=202"
+            f"/api/dashboard?group_id={group_id}&from=2026-09-28&to=2026-09-29"
+            "&character_id=101&character_id=202"
         ).json()
         assert report["selected_ids"] == [101, 202]
         assert (report["income"], report["tax"], report["net"]) == (
@@ -550,7 +739,8 @@ def test_repeated_character_selection_includes_disabled_and_continuous_inclusive
         assert len(report["daily"]) == 2
         assert [row["income"] for row in report["characters"]] == ["10.1", "20.02"]
         disabled_only = client.get(
-            "/api/dashboard?from=2026-09-28&to=2026-09-29&character_id=202"
+            f"/api/dashboard?group_id={group_id}&from=2026-09-28&to=2026-09-29"
+            "&character_id=202"
         ).json()
         assert disabled_only["income"] == "20.02"
         assert disabled_only["tax"] == "0"
@@ -560,8 +750,10 @@ def test_entries_filter_by_character_date_and_income_or_tax_classification(conte
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
-        seed_reports(services, clock)
-        response = client.get("/api/entries?from=2026-09-28&to=2026-09-29")
+        group_id = seed_reports(services, clock)
+        response = client.get(
+            f"/api/entries?group_id={group_id}&from=2026-09-28&to=2026-09-29"
+        )
         assert response.status_code == 200
         entries = response.json()["entries"]
         assert [entry["journal_id"] for entry in entries] == [1, 2]
@@ -570,9 +762,153 @@ def test_entries_filter_by_character_date_and_income_or_tax_classification(conte
         assert [entry["date"] for entry in entries] == ["2026-09-28", "2026-09-29"]
         assert all(entry["character_id"] == 101 for entry in entries)
         selected = client.get(
-            "/api/entries?from=2026-09-28&to=2026-09-29&character_id=202"
+            f"/api/entries?group_id={group_id}&from=2026-09-28&to=2026-09-29"
+            "&character_id=202"
         ).json()["entries"]
         assert len(selected) == 1 and selected[0]["character_id"] == 202
+
+
+def test_group_report_requires_known_group_and_rejects_cross_group_selection(context):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        group_id = seed_reports(services, clock)
+        other = services.groups.create("Other Group", clock.now_utc())
+        services.characters.upsert_authorization(
+            303, "Other Pilot", "private-other-token", clock.now_utc()
+        )
+        services.characters.set_group(303, other.group_id)
+
+        missing = client.get("/api/dashboard")
+        unknown = client.get("/api/entries?group_id=999")
+        cross_group = client.get(f"/api/dashboard?group_id={group_id}&character_id=303")
+        services.groups.delete(group_id)
+        deleted = client.get(f"/api/dashboard?group_id={group_id}")
+
+        assert (missing.status_code, missing.json()["error"]["code"]) == (
+            400,
+            "invalid_request",
+        )
+        assert (unknown.status_code, unknown.json()["error"]["code"]) == (
+            404,
+            "unknown_group",
+        )
+        assert (
+            cross_group.status_code,
+            cross_group.json()["error"]["code"],
+        ) == (400, "character_not_in_group")
+        assert (deleted.status_code, deleted.json()["error"]["code"]) == (
+            404,
+            "unknown_group",
+        )
+        for response in (missing, unknown, cross_group, deleted):
+            assert "private-" not in response.text
+            assert "sqlite" not in response.text.lower()
+
+
+def test_group_report_combines_external_donation_and_excludes_internal_transfer(
+    context,
+):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        group_id = seed_reports(services, clock)
+        services.journal.commit_sync_batch(
+            101,
+            [
+                JournalEntry(
+                    journal_id=6,
+                    character_id=101,
+                    date_utc=datetime(2026, 9, 28, 10, tzinfo=UTC),
+                    amount=Decimal(25),
+                    ref_type="player_donation",
+                    description="external donation",
+                    first_party_id=9001,
+                    second_party_id=101,
+                ),
+                JournalEntry(
+                    journal_id=7,
+                    character_id=101,
+                    date_utc=datetime(2026, 9, 28, 11, tzinfo=UTC),
+                    amount=Decimal(40),
+                    ref_type="player_donation",
+                    description="internal donation",
+                    first_party_id=202,
+                    second_party_id=101,
+                ),
+            ],
+            clock.now_utc(),
+        )
+
+        report = client.get(
+            f"/api/dashboard?group_id={group_id}&from=2026-09-28&to=2026-09-29"
+        ).json()
+        assert (report["group_id"], report["group_name"]) == (group_id, "Main Group")
+        assert report["selected_ids"] == [101]
+        assert (report["income"], report["tax"], report["net"]) == (
+            "35.1",
+            "2.2",
+            "32.9",
+        )
+        category = next(
+            item for item in report["categories"] if item["category"] == "玩家转账"
+        )
+        assert category == {
+            "category": "玩家转账",
+            "income": "25",
+            "tax": "0",
+            "net": "25",
+        }
+        entries_payload = client.get(
+            f"/api/entries?group_id={group_id}&from=2026-09-28&to=2026-09-29"
+        ).json()
+        assert (
+            entries_payload["group_id"],
+            entries_payload["group_name"],
+        ) == (group_id, "Main Group")
+        donation_rows = [
+            entry
+            for entry in entries_payload["entries"]
+            if entry["ref_type"] == "player_donation"
+        ]
+        assert [(row["journal_id"], row["category"]) for row in donation_rows] == [
+            (6, "玩家转账")
+        ]
+
+        disabled = client.get(
+            f"/api/dashboard?group_id={group_id}&from=2026-09-28&to=2026-09-29"
+            "&character_id=202"
+        ).json()
+        assert disabled["selected_ids"] == [202]
+        assert disabled["income"] == "20.02"
+
+
+def test_ungrouped_initial_sync_data_is_hidden_until_character_is_assigned(context):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        group = services.groups.create("Empty Group", clock.now_utc())
+        services.journal.commit_sync_batch(
+            101,
+            [
+                JournalEntry(
+                    88,
+                    101,
+                    clock.now_utc(),
+                    Decimal(5),
+                    "bounty_prizes",
+                )
+            ],
+            clock.now_utc(),
+        )
+
+        hidden = client.get(f"/api/dashboard?group_id={group.group_id}").json()
+        assert hidden["selected_ids"] == []
+        assert hidden["income"] == "0"
+        services.characters.set_group(101, group.group_id)
+        visible = client.get(f"/api/dashboard?group_id={group.group_id}").json()
+        assert visible["selected_ids"] == [101]
+        assert visible["income"] == "5"
 
 
 @pytest.mark.parametrize("route", ["/api/dashboard", "/api/entries"])
@@ -594,7 +930,8 @@ def test_report_query_validation_is_safe_and_returns_400(context, route, query):
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
-        response = client.get(route + "?" + query)
+        group = services.groups.create("Validation Group", clock.now_utc())
+        response = client.get(f"{route}?group_id={group.group_id}&{query}")
         assert response.status_code == 400
         assert set(response.json()) == {"error"}
         assert set(response.json()["error"]) == {"code", "message"}
@@ -604,12 +941,15 @@ def test_366_day_report_is_accepted(context):
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
-        response = client.get("/api/dashboard?from=2024-01-01&to=2024-12-31")
+        group = services.groups.create("Long Range", clock.now_utc())
+        response = client.get(
+            f"/api/dashboard?group_id={group.group_id}&from=2024-01-01&to=2024-12-31"
+        )
         assert response.status_code == 200
         assert len(response.json()["daily"]) == 366
 
 
-@pytest.mark.parametrize("route", ["/api/sync", "/api/characters/101/enabled"])
+@pytest.mark.parametrize("route", ["/api/characters/101/enabled"])
 def test_mutations_require_authentication_and_matching_csrf(context, route):
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
@@ -632,7 +972,7 @@ def test_enabled_mutation_changes_default_report_and_unknown_character_is_404(co
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
-        seed_reports(services, clock)
+        group_id = seed_reports(services, clock)
         csrf = {
             "X-CSRF-Token": session_data(client, settings.app_session_secret)[
                 "csrf_token"
@@ -643,11 +983,17 @@ def test_enabled_mutation_changes_default_report_and_unknown_character_is_404(co
         )
         assert response.status_code == 200
         assert response.json()["character"]["enabled"] is True
-        assert client.get("/api/dashboard").json()["income"] == "30.12"
+        assert (
+            client.get(f"/api/dashboard?group_id={group_id}").json()["income"]
+            == "30.12"
+        )
         client.post(
             "/api/characters/101/enabled", json={"enabled": False}, headers=csrf
         )
-        assert client.get("/api/dashboard").json()["income"] == "20.02"
+        assert (
+            client.get(f"/api/dashboard?group_id={group_id}").json()["income"]
+            == "20.02"
+        )
         missing = client.post(
             "/api/characters/999/enabled", json={"enabled": True}, headers=csrf
         )
@@ -675,14 +1021,37 @@ def test_invalid_mutation_body_returns_sanitized_400(context, payload):
         assert "private-" not in response.text
 
 
+def test_sync_requires_authentication_csrf_and_known_group(context):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        assert client.post("/api/sync?group_id=1").status_code == 401
+        authorize(client, settings)
+        group = services.groups.create("Sync Group", clock.now_utc())
+        assert client.post(f"/api/sync?group_id={group.group_id}").status_code == 403
+        headers = csrf_headers(client, settings)
+        missing = client.post("/api/sync", headers=headers)
+        unknown = client.post("/api/sync?group_id=999", headers=headers)
+        assert (missing.status_code, missing.json()["error"]["code"]) == (
+            400,
+            "invalid_request",
+        )
+        assert (unknown.status_code, unknown.json()["error"]["code"]) == (
+            404,
+            "unknown_group",
+        )
+        response = client.post(f"/api/sync?group_id={group.group_id}", headers=headers)
+        assert response.status_code == 200
+        assert services.sync.calls[-1] == ("group", group.group_id)
+
+
 def test_sync_returns_partial_role_results_without_losing_old_report(context):
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
-        seed_reports(services, clock)
+        group_id = seed_reports(services, clock)
         services.characters.set_enabled(202, True)
         services.characters.mark_authorization_required(202)
-        before = client.get("/api/dashboard").json()
+        before = client.get(f"/api/dashboard?group_id={group_id}").json()
         services.sync.results = (
             SyncResult(101, 3, clock.now_utc(), "ok", None),
             SyncResult(202, 0, clock.now_utc(), "failed", "authorization_failed"),
@@ -692,7 +1061,7 @@ def test_sync_returns_partial_role_results_without_losing_old_report(context):
                 "csrf_token"
             ]
         }
-        response = client.post("/api/sync", headers=csrf)
+        response = client.post(f"/api/sync?group_id={group_id}", headers=csrf)
         assert response.status_code == 200
         first, second = response.json()["results"]
         assert (first["character_id"], first["new_count"], first["status"]) == (
@@ -705,7 +1074,8 @@ def test_sync_returns_partial_role_results_without_losing_old_report(context):
             "code": "authorization_failed",
             "message": "角色授权已失效，请重新授权。",
         }
-        assert client.get("/api/dashboard").json() == before
+        assert services.sync.calls[-1] == ("group", group_id)
+        assert client.get(f"/api/dashboard?group_id={group_id}").json() == before
         assert (
             client.get("/api/characters").json()["characters"][1][
                 "authorization_required"
@@ -718,6 +1088,7 @@ def test_sync_arbitrary_error_code_is_not_echoed(context):
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
+        group = services.groups.create("Sync Group", clock.now_utc())
         services.sync.results = (
             SyncResult(101, 0, clock.now_utc(), "failed", "private-error-token"),
         )
@@ -726,7 +1097,7 @@ def test_sync_arbitrary_error_code_is_not_echoed(context):
                 "csrf_token"
             ]
         }
-        response = client.post("/api/sync", headers=csrf)
+        response = client.post(f"/api/sync?group_id={group.group_id}", headers=csrf)
         assert response.status_code == 200
         assert response.json()["results"][0]["error"]["code"] == "sync_failed"
         assert "private-" not in response.text
@@ -744,17 +1115,20 @@ def test_service_exceptions_use_stable_safe_errors(context, failure, status, cod
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
+        group = services.groups.create("Failure Group", clock.now_utc())
         services.sync.fail = failure
         csrf = {
             "X-CSRF-Token": session_data(client, settings.app_session_secret)[
                 "csrf_token"
             ]
         }
-        response = client.post("/api/sync", headers=csrf)
+        response = client.post(f"/api/sync?group_id={group.group_id}", headers=csrf)
         assert response.status_code == status
         assert response.json()["error"]["code"] == code
         assert "private-" not in response.text
-        assert client.get("/api/dashboard").status_code == 200
+        assert (
+            client.get(f"/api/dashboard?group_id={group.group_id}").status_code == 200
+        )
 
 
 def test_missing_sync_configuration_disables_sync(context):
@@ -762,12 +1136,13 @@ def test_missing_sync_configuration_disables_sync(context):
     services.sync = None
     with TestClient(create_app(settings, services, clock)) as client:
         authorize(client, settings)
+        group = services.groups.create("No Sync Group", clock.now_utc())
         csrf = {
             "X-CSRF-Token": session_data(client, settings.app_session_secret)[
                 "csrf_token"
             ]
         }
-        response = client.post("/api/sync", headers=csrf)
+        response = client.post(f"/api/sync?group_id={group.group_id}", headers=csrf)
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "configuration_required"
 
@@ -804,8 +1179,9 @@ def test_repository_error_uses_sanitized_data_error(context, monkeypatch):
         create_app(settings, services, clock), raise_server_exceptions=False
     ) as client:
         authorize(client, settings)
+        group = services.groups.create("Broken Read Group", clock.now_utc())
         monkeypatch.setattr(services.journal, "list_for_report", broken_read)
-        response = client.get("/api/dashboard")
+        response = client.get(f"/api/dashboard?group_id={group.group_id}")
         assert response.status_code == 500
         assert response.json()["error"]["code"] == "data_error"
         assert "private-" not in response.text
