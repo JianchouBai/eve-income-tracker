@@ -99,3 +99,10 @@ class SyncService:
             if record.enabled:
                 results.append(await self.sync_character(record.character_id))
         return SyncAllResult(tuple(results))
+
+    async def sync_group(self, group_id: int) -> SyncAllResult:
+        results = []
+        for record in self._characters.list_for_group(group_id):
+            if record.enabled:
+                results.append(await self.sync_character(record.character_id))
+        return SyncAllResult(tuple(results))

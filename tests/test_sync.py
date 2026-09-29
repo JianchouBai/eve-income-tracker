@@ -9,7 +9,12 @@ from app.esi import EsiAuthorizationError, EsiDataError
 from app.models import JournalEntry
 from app.security import TokenCipher
 from app.sso import SsoError, TokenSet
-from app.storage import CharacterRepository, Database, JournalRepository
+from app.storage import (
+    CharacterGroupRepository,
+    CharacterRepository,
+    Database,
+    JournalRepository,
+)
 from app.sync import SyncService
 
 NOW = datetime(2026, 9, 28, 12, tzinfo=UTC)
@@ -122,9 +127,20 @@ def test_failed_fetch_preserves_batch_and_sync_time_but_persists_rotated_token(
     asyncio.run(scenario())
 
 
-def test_sync_enabled_is_sequential_isolated_and_skips_disabled(tmp_path):
+def test_sync_group_is_sequential_isolated_and_scoped_to_enabled_members(tmp_path):
     async def scenario():
         characters, journal, cipher = services(tmp_path, enabled=(1, 2, 3))
+        groups = CharacterGroupRepository(characters.database)
+        target = groups.create("Target", START)
+        other = groups.create("Other", NOW)
+        characters.set_group(1, target.group_id)
+        characters.set_group(2, target.group_id)
+        characters.set_group(3, other.group_id)
+        characters.upsert_authorization(
+            5, "Pilot 5", cipher.encrypt("refresh-5"), START
+        )
+        characters.set_enabled(5, False)
+        characters.set_group(5, target.group_id)
 
         class PerCharacterEsi(FakeEsi):
             async def fetch_wallet_journal(self, access_token: str, character_id: int):
@@ -136,21 +152,21 @@ def test_sync_enabled_is_sequential_isolated_and_skips_disabled(tmp_path):
         esi = PerCharacterEsi([])
         results = await SyncService(
             characters, journal, cipher, FakeSso(), esi, clock=lambda: NOW
-        ).sync_enabled()
+        ).sync_group(target.group_id)
 
-        assert esi.calls == [1, 2, 3]
+        assert esi.calls == [1, 2]
         assert [(item.character_id, item.status) for item in results.results] == [
             (1, "ok"),
             (2, "failed"),
-            (3, "ok"),
         ]
-        assert characters.list_all()[1].authorization_required is True
+        records = {item.character_id: item for item in characters.list_all()}
+        assert records[2].authorization_required is True
         assert [
             item.character_id
             for item in journal.list_for_report(
-                {1, 2, 3, 4}, START, datetime(2026, 9, 29, tzinfo=UTC)
+                {1, 2, 3, 4, 5}, START, datetime(2026, 9, 29, tzinfo=UTC)
             )
-        ] == [1, 3]
+        ] == [1]
         assert all("access-token" not in str(item) for item in results.results)
 
     asyncio.run(scenario())
