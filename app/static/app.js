@@ -1,6 +1,8 @@
 const $ = (id) => document.getElementById(id);
 const csrf = document.querySelector('meta[name=csrf-token]').content;
 let report;
+let groups = [];
+let selectedGroupId = null;
 let selectedCharacterIds = new Set();
 let charactersById = new Map();
 
@@ -30,14 +32,27 @@ function checkedCharacterIds() {
 function query() {
   selectedCharacterIds = checkedCharacterIds();
   const params = new URLSearchParams({ from: $('date-from').value, to: $('date-to').value });
+  params.set('group_id', String(selectedGroupId));
   selectedCharacterIds.forEach((characterId) => params.append('character_id', characterId));
   return params;
 }
 
-async function get(path) {
-  const response = await fetch(path);
-  if (!response.ok) throw new Error('request failed');
+async function request(path, options) {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+    throw new Error(payload?.error?.message || '请求失败，请稍后再试。');
+  }
   return response.json();
+}
+
+async function get(path) {
+  return request(path);
 }
 
 function message(text, error = false) {
@@ -201,6 +216,7 @@ function render(data, entries) {
 }
 
 async function load() {
+  if (!selectedGroupId) return;
   try {
     const parameters = query();
     const [data, entries] = await Promise.all([
@@ -208,8 +224,8 @@ async function load() {
     ]);
     render(data, entries);
     message('报表已更新。');
-  } catch {
-    message('无法加载报表，请稍后再试。', true);
+  } catch (error) {
+    message(error.message || '无法加载报表，请稍后再试。', true);
   }
 }
 
@@ -230,40 +246,243 @@ async function setEnabled(characterId, enabled, button) {
     await roles();
     await load();
     message(enabled ? '该角色已启用统计。' : '该角色已停止统计；仍可勾选查看历史。');
-  } catch {
+  } catch (error) {
     button.disabled = false;
-    message('无法更新角色统计状态，请稍后再试。', true);
+    message(error.message || '无法更新角色统计状态，请稍后再试。', true);
   }
 }
 
-async function roles() {
-  const currentSelection = checkedCharacterIds();
-  if (currentSelection.size) selectedCharacterIds = currentSelection;
-  const data = await get('/api/characters');
-  charactersById = new Map(data.characters.map((character) => [String(character.character_id), character]));
-  const box = $('enable-region');
-  box.replaceChildren();
-  data.characters.forEach((character) => {
-    const row = document.createElement('div');
-    row.className = 'role-row';
-    const label = document.createElement('label');
-    const reportSelect = document.createElement('input');
-    reportSelect.type = 'checkbox';
-    reportSelect.value = character.character_id;
-    reportSelect.dataset.reportSelect = 'true';
-    reportSelect.checked = selectedCharacterIds.size ? selectedCharacterIds.has(String(character.character_id)) : character.enabled;
-    const text = document.createElement('span');
-    text.textContent = `报表：${character.name} (${character.character_id})`;
-    const status = document.createElement('small');
-    status.textContent = roleStatus(character);
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.textContent = character.enabled ? '停止统计' : '启用统计';
-    toggle.addEventListener('click', () => setEnabled(character.character_id, !character.enabled, toggle));
-    label.append(reportSelect, text);
-    row.append(label, status, toggle);
-    box.append(row);
+function emptyState(target, text) {
+  target.replaceChildren();
+  const guidance = document.createElement('p');
+  guidance.className = 'empty-guidance';
+  guidance.textContent = text;
+  target.append(guidance);
+}
+
+function activeGroup() {
+  return groups.find((group) => String(group.group_id) === selectedGroupId) || null;
+}
+
+function setWorkspaceAvailability() {
+  const hasGroup = Boolean(activeGroup());
+  $('rename-group-button').disabled = !hasGroup;
+  $('delete-group-button').disabled = !hasGroup;
+  $('report-button').disabled = !hasGroup;
+  $('sync-button').disabled = !hasGroup;
+  $('report-deck').hidden = !hasGroup;
+}
+
+function renderGroupOptions() {
+  const select = $('group-select');
+  select.replaceChildren();
+  if (!groups.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '暂无角色组';
+    select.append(option);
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  groups.forEach((group) => {
+    const option = document.createElement('option');
+    option.value = group.group_id;
+    option.textContent = `${group.name}（${group.member_count} 名）`;
+    option.selected = String(group.group_id) === selectedGroupId;
+    select.append(option);
   });
+}
+
+function renderMember(character, target) {
+  const row = document.createElement('div');
+  row.className = 'role-row';
+  const label = document.createElement('label');
+  const reportSelect = document.createElement('input');
+  reportSelect.type = 'checkbox';
+  reportSelect.value = character.character_id;
+  reportSelect.dataset.reportSelect = 'true';
+  reportSelect.checked = selectedCharacterIds.size ? selectedCharacterIds.has(String(character.character_id)) : character.enabled;
+  const text = document.createElement('span');
+  text.textContent = `${character.name} (${character.character_id})`;
+  const status = document.createElement('small');
+  status.textContent = roleStatus(character);
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'text-action status-action';
+  toggle.textContent = character.enabled ? '停止统计' : '启用统计';
+  toggle.setAttribute('aria-label', `${toggle.textContent}：${character.name}`);
+  toggle.addEventListener('click', () => setEnabled(character.character_id, !character.enabled, toggle));
+  label.append(reportSelect, text);
+  row.append(label, status, toggle);
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'text-action membership-action';
+  remove.textContent = '移回未分组';
+  remove.setAttribute('aria-label', `将 ${character.name} 移回未分组`);
+  remove.addEventListener('click', () => assignCharacterGroup(character.character_id, null, remove));
+  row.append(remove);
+  target.append(row);
+}
+
+function renderUngroupedCharacter(character, target) {
+  const row = document.createElement('div');
+  row.className = 'role-row ungrouped-row';
+  const identity = document.createElement('span');
+  identity.className = 'role-identity';
+  identity.textContent = `${character.name} (${character.character_id})`;
+  const status = document.createElement('small');
+  status.textContent = roleStatus(character);
+  const join = document.createElement('button');
+  join.type = 'button';
+  join.className = 'text-action membership-action';
+  join.textContent = '加入当前组';
+  join.disabled = !selectedGroupId;
+  join.setAttribute('aria-label', `将 ${character.name} 加入当前角色组`);
+  join.addEventListener('click', () => assignCharacterGroup(character.character_id, activeGroup().group_id, join));
+  row.append(identity, status, join);
+  target.append(row);
+}
+
+function renderRoles() {
+  const group = activeGroup();
+  const characters = [...charactersById.values()];
+  const members = group ? characters.filter((character) => String(character.group_id) === selectedGroupId) : [];
+  const ungrouped = characters.filter((character) => character.group_id === null);
+  $('active-group-name').textContent = group ? `${group.name} · ${members.length} 名` : '尚未创建角色组';
+
+  const memberRegion = $('enable-region');
+  memberRegion.replaceChildren();
+  if (!group) {
+    emptyState(memberRegion, '先创建角色组，再把已授权角色加入组内。');
+  } else if (!members.length) {
+    emptyState(memberRegion, '这个角色组还没有成员，请从下方未分组角色中添加。');
+  } else {
+    members.forEach((character) => renderMember(character, memberRegion));
+  }
+
+  const ungroupedRegion = $('ungrouped-region');
+  ungroupedRegion.replaceChildren();
+  if (!ungrouped.length) {
+    emptyState(ungroupedRegion, '当前没有未分组角色。');
+  } else {
+    ungrouped.forEach((character) => renderUngroupedCharacter(character, ungroupedRegion));
+  }
+}
+
+async function roles({ captureSelection = true } = {}) {
+  if (captureSelection) {
+    const currentSelection = checkedCharacterIds();
+    if (currentSelection.size) selectedCharacterIds = currentSelection;
+  }
+  const [groupData, characterData] = await Promise.all([get('/api/groups'), get('/api/characters')]);
+  groups = groupData.groups;
+  charactersById = new Map(characterData.characters.map((character) => [String(character.character_id), character]));
+  if (!selectedGroupId || !groups.some((group) => String(group.group_id) === selectedGroupId)) {
+    selectedGroupId = groups.length ? String(groups[0].group_id) : null;
+    selectedCharacterIds.clear();
+  }
+  renderGroupOptions();
+  renderRoles();
+  setWorkspaceAvailability();
+}
+
+function enteredGroupName() {
+  const name = $('group-name').value.trim();
+  if (!name) {
+    message('请输入角色组名称。', true);
+    $('group-name').focus();
+    return null;
+  }
+  return name;
+}
+
+async function createGroup() {
+  const name = enteredGroupName();
+  if (!name) return;
+  const button = $('create-group-button');
+  button.disabled = true;
+  try {
+    const payload = await request('/api/groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify({ name }),
+    });
+    selectedGroupId = String(payload.group.group_id);
+    selectedCharacterIds.clear();
+    $('group-name').value = '';
+    await roles({ captureSelection: false });
+    await load();
+    message(`角色组“${payload.group.name}”已创建。`);
+  } catch (error) {
+    message(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function renameGroup() {
+  const name = enteredGroupName();
+  if (!name || !selectedGroupId) return;
+  const button = $('rename-group-button');
+  button.disabled = true;
+  try {
+    const payload = await request(`/api/groups/${selectedGroupId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify({ name }),
+    });
+    $('group-name').value = '';
+    await roles();
+    await load();
+    message(`角色组已重命名为“${payload.group.name}”。`);
+  } catch (error) {
+    message(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function deleteGroup() {
+  const group = activeGroup();
+  if (!group || !confirm('删除后，组内角色将移回未分组，钱包流水不会被删除。确定删除吗？')) return;
+  const button = $('delete-group-button');
+  button.disabled = true;
+  try {
+    await request(`/api/groups/${selectedGroupId}`, {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': csrf },
+    });
+    selectedGroupId = null;
+    selectedCharacterIds.clear();
+    await roles({ captureSelection: false });
+    await load();
+    message(`角色组“${group.name}”已删除，原成员已移回未分组。`);
+  } catch (error) {
+    message(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function assignCharacterGroup(characterId, groupId, button) {
+  button.disabled = true;
+  try {
+    await request(`/api/characters/${characterId}/group`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify({ group_id: groupId }),
+    });
+    selectedCharacterIds = checkedCharacterIds();
+    if (groupId === null) selectedCharacterIds.delete(String(characterId));
+    else if (charactersById.get(String(characterId))?.enabled) selectedCharacterIds.add(String(characterId));
+    await roles({ captureSelection: false });
+    await load();
+    message(groupId === null ? '角色已移回未分组。' : '角色已加入当前组。');
+  } catch (error) {
+    button.disabled = false;
+    message(error.message, true);
+  }
 }
 
 function renderSyncResults(results) {
@@ -290,20 +509,22 @@ function renderSyncResults(results) {
 }
 
 async function sync() {
+  if (!selectedGroupId) return;
   const button = $('sync-button');
   button.disabled = true;
   try {
-    const response = await fetch('/api/sync', { method: 'POST', headers: { 'X-CSRF-Token': csrf } });
-    if (!response.ok) throw new Error('request failed');
-    const payload = await response.json();
+    const payload = await request(`/api/sync?group_id=${selectedGroupId}`, {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrf },
+    });
     renderSyncResults(payload.results || []);
     await roles();
     await load();
     message('同步完成；各角色结果见同步状态。');
-  } catch {
-    message('同步失败；当前报表已保留。', true);
+  } catch (error) {
+    message(error.message || '同步失败；当前报表已保留。', true);
   } finally {
-    button.disabled = false;
+    button.disabled = !selectedGroupId;
   }
 }
 
@@ -313,6 +534,22 @@ document.addEventListener('DOMContentLoaded', () => {
   $('date-from').value = beijingDate(-29);
   $('role-filters').addEventListener('submit', (event) => { event.preventDefault(); load(); });
   $('sync-button').addEventListener('click', sync);
-  roles().then(load).catch(() => message('无法加载角色，请稍后再试。', true));
+  $('create-group-button').addEventListener('click', createGroup);
+  $('rename-group-button').addEventListener('click', renameGroup);
+  $('delete-group-button').addEventListener('click', deleteGroup);
+  $('group-name').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      createGroup();
+    }
+  });
+  $('group-select').addEventListener('change', async (event) => {
+    selectedGroupId = event.target.value || null;
+    selectedCharacterIds.clear();
+    renderRoles();
+    setWorkspaceAvailability();
+    await load();
+  });
+  roles().then(load).catch((error) => message(error.message || '无法加载角色，请稍后再试。', true));
   addEventListener('resize', () => report && draw(report.daily));
 });

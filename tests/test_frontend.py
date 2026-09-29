@@ -47,12 +47,19 @@ def test_dashboard_shell_contains_semantic_regions_and_local_assets(tmp_path):
     assert page.status_code == 200
     for token in [
         "role-filters",
+        "group-select",
+        "group-name",
+        "create-group-button",
+        "rename-group-button",
+        "delete-group-button",
+        "active-group-name",
         "date-from",
         "date-to",
         "sync-button",
         "add-role-link",
         "reauthorize-link",
         "enable-region",
+        "ungrouped-region",
         "summary-income",
         "summary-tax",
         "summary-net",
@@ -75,7 +82,7 @@ def test_dashboard_exposes_financial_hierarchy_and_chart_legend(tmp_path):
         page = browser.get("/").text
 
     assert "id='page-title'" in page
-    assert "<aside class='command-rail' aria-label='角色与日期控制'>" in page
+    assert "<aside class='command-rail' aria-label='角色组、角色与日期控制'>" in page
     assert "<section class='summary-ledger' aria-label='收益汇总'>" in page
     assert "aria-describedby='trend-legend trend-fallback'" in page
     assert "id='trend-legend'" in page
@@ -112,6 +119,62 @@ def test_dashboard_script_contract_covers_enable_sync_status_decimal_details_and
     assert "sync-results" in page
     assert "Number(x.net)" not in script
     assert "innerHTML" not in script
+
+
+def test_group_workspace_has_accessible_plain_language_controls(tmp_path):
+    with client(tmp_path) as browser:
+        page = browser.get("/").text
+
+    for token in [
+        "<label for='group-select'>角色组</label>",
+        "<label for='group-name'>组名</label>",
+        "maxlength='50'",
+        ">创建组</button>",
+        ">重命名</button>",
+        ">删除组</button>",
+        "当前角色组",
+        "未分组角色",
+    ]:
+        assert token in page
+
+
+def test_group_workspace_script_calls_group_and_membership_apis(tmp_path):
+    with client(tmp_path) as browser:
+        script = browser.get("/static/app.js").text
+
+    for token in [
+        "get('/api/groups')",
+        "request('/api/groups',",
+        "request(`/api/groups/${selectedGroupId}`",
+        "request(`/api/characters/${characterId}/group`",
+        "method: 'POST'",
+        "method: 'PATCH'",
+        "method: 'DELETE'",
+        "JSON.stringify({ name })",
+        "JSON.stringify({ group_id: groupId })",
+        "params.set('group_id', String(selectedGroupId))",
+        "`/api/sync?group_id=${selectedGroupId}`",
+    ]:
+        assert token in script
+    assert "innerHTML" not in script
+
+
+def test_group_workspace_script_preserves_data_and_guides_empty_states(tmp_path):
+    with client(tmp_path) as browser:
+        script = browser.get("/static/app.js").text
+
+    assert "删除后，组内角色将移回未分组，钱包流水不会被删除。确定删除吗？" in script
+    assert "selectedGroupId = groups.length ? String(groups[0].group_id) : null;" in script
+    assert "先创建角色组，再把已授权角色加入组内。" in script
+    assert "这个角色组还没有成员，请从下方未分组角色中添加。" in script
+    assert "当前没有未分组角色。" in script
+    assert "setWorkspaceAvailability" in script
+    availability = script.split("function setWorkspaceAvailability() {", 1)[1].split(
+        "function renderGroupOptions", 1
+    )[0]
+    assert "$('report-button').disabled = !hasGroup;" in availability
+    assert "$('sync-button').disabled = !hasGroup;" in availability
+    assert "$('report-deck').hidden = !hasGroup;" in availability
 
 
 def test_dashboard_chart_contract_uses_one_exact_scale_for_all_money_series(tmp_path):
