@@ -247,3 +247,69 @@ def test_readme_documents_desktop_and_frozen_smoke_commands():
     assert "python.exe -m app.desktop" in readme
     assert "python.exe -m app.desktop --smoke-test" in readme
     assert "%LOCALAPPDATA%\\EVE Income Tracker" in readme
+
+def test_readme_leads_with_installed_windows_operation_contract():
+    readme = read_readme()
+
+    installed_section = readme.split("## 开发与维护", 1)[0]
+    for statement in [
+        "无需安装 Python",
+        "无需打开终端",
+        "系统默认浏览器",
+        "PKCE",
+        "每台电脑使用独立数据库",
+        r"%LOCALAPPDATA%\EVE Income Tracker",
+        "不使用 Client Secret",
+        "旧版 v2",
+        "重新授权",
+        "升级不会删除",
+        "默认保留个人数据",
+        "同时删除个人数据",
+        "手动创建 GitHub Release",
+        "未知发布者",
+    ]:
+        assert statement in installed_section
+
+    assert "Python 3.11+" in readme
+    assert "uvicorn app.main:app" in readme
+    assert "scripts\\build_windows.ps1" in readme
+
+
+def test_readme_documents_private_local_files_never_enter_git():
+    readme = read_readme()
+
+    for local_item in [
+        "数据库",
+        "DPAPI 密钥",
+        "日志",
+        "备份",
+        "release-config.local.json",
+        "installer-output",
+    ]:
+        assert local_item in readme
+    assert "不会进入 Git" in readme
+
+
+def test_windows_release_checklist_covers_desktop_acceptance_contract():
+    checklist_path = ROOT / "docs" / "windows-release-checklist.md"
+    assert checklist_path.is_file()
+    checklist = checklist_path.read_text(encoding="utf-8")
+
+    for statement in [
+        "全新安装",
+        "开始菜单",
+        "桌面快捷方式",
+        "重复启动",
+        "授权",
+        "同步钱包流水",
+        "关闭并重新打开",
+        "覆盖升级",
+        "旧版 v2",
+        "源数据库",
+        "缺少 WebView2",
+        "保留个人数据",
+        "删除个人数据",
+        "第二台干净电脑",
+        "卸载",
+    ]:
+        assert statement in checklist
