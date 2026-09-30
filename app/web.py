@@ -168,7 +168,7 @@ def _log_authorization_failure(stage: str, error: Exception) -> None:
         if isinstance(error, SsoError) and error.code in SAFE_SSO_ERROR_CODES
         else "unexpected_error"
     )
-    logger.warning("EVE authorization failed: stage=%s code=%s", stage, code)
+    logger.warning("EVE authorization failed: stage=%s error_code=%s", stage, code)
 
 
 def _require_viewer(request: Request) -> None:

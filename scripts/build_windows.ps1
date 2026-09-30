@@ -4,6 +4,7 @@ param(
     [string]$ReleaseConfig = "",
     [string]$InnoCompiler = "",
     [string]$WebView2Bootstrapper = "",
+    [string]$ReleaseBase = "",
     [switch]$FixtureMode,
     [string]$FixtureRoot = "",
     [ValidateSet("Clean", "Install", "Uninstall")]
@@ -245,16 +246,34 @@ $headCommit = (& git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $headCommit -notmatch "^[0-9a-f]{40,64}$") {
     throw "Unable to determine the current Git commit."
 }
-$releaseBase = (& git merge-base origin/main HEAD).Trim()
-if (
-    $LASTEXITCODE -ne 0 -or
-    $releaseBase -notmatch "^[0-9a-f]{40,64}$" -or
-    $releaseBase -eq $headCommit
-) {
-    $releaseBase = (& git rev-parse "HEAD^").Trim()
-    if ($LASTEXITCODE -ne 0 -or $releaseBase -notmatch "^[0-9a-f]{40,64}$") {
-        throw "Unable to determine a Git release base."
+$requestedReleaseBase = $ReleaseBase.Trim()
+if ($requestedReleaseBase) {
+    $releaseBaseOutput = @(& git rev-parse --verify "$requestedReleaseBase^{commit}")
+    if (
+        $LASTEXITCODE -ne 0 -or
+        -not $releaseBaseOutput -or
+        $releaseBaseOutput[-1].Trim() -notmatch "^[0-9a-f]{40,64}$"
+    ) {
+        throw "ReleaseBase must identify a Git commit."
     }
+    $releaseBase = $releaseBaseOutput[-1].Trim()
+    Invoke-Checked "git" @("merge-base", "--is-ancestor", $releaseBase, "HEAD") "ReleaseBase ancestry check"
+} else {
+    $mergeBaseOutput = @(& git merge-base origin/main HEAD)
+    if (
+        $LASTEXITCODE -ne 0 -or
+        -not $mergeBaseOutput -or
+        $mergeBaseOutput[-1].Trim() -notmatch "^[0-9a-f]{40,64}$"
+    ) {
+        throw "ReleaseBase is required when origin/main cannot determine the release range."
+    }
+    $releaseBase = $mergeBaseOutput[-1].Trim()
+    if ($releaseBase -eq $headCommit) {
+        throw "ReleaseBase is required when HEAD equals origin/main."
+    }
+}
+if ($releaseBase -eq $headCommit) {
+    throw "ReleaseBase must precede HEAD."
 }
 Write-Host "[gate] release range $releaseBase..HEAD"
 Invoke-Checked "git" @("diff", "--check", $releaseBase, "HEAD") "git diff --check"

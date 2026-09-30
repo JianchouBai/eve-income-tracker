@@ -163,4 +163,6 @@ py -3.12 -m pip install -r requirements-build.txt
 .\scripts\build_windows.ps1
 ```
 
+功能分支默认以与 `origin/main` 的共同祖先作为发布基线。如果当前 `HEAD` 已等于 `origin/main`，或需要指定其他发布范围，必须显式传入上一个版本标签或提交，例如 `.\scripts\build_windows.ps1 -ReleaseBase v0.1.0`；基线必须是当前 `HEAD` 的祖先且不能等于 `HEAD`。
+
 构建脚本会验证公开配置与微软签名，运行全量测试、Ruff 和 Git 差异检查，生成资源并执行 PyInstaller 冻结烟雾检查，最后用 Inno Setup 7 生成 `installer-output\EVE-Income-Tracker-<版本>-x64-Setup.exe` 并打印绝对路径和 SHA-256。`release-config.local.json`、WebView2 引导程序、`build`、`dist` 与 `installer-output` 均留在本机，不上传远端仓库。

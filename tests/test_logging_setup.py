@@ -32,7 +32,8 @@ def test_desktop_log_redacts_credentials_callback_queries_and_wallet_text(tmp_pa
     module.configure_desktop_logging(log_path)
     logger = logging.getLogger("app.desktop.redaction_test")
     logger.info(
-        "stage=token_exchange status=failed code=private-standalone-code "
+        "stage=token_exchange status=failed error_code=safe_request_failed "
+        "code=private-standalone-code "
         "url=http://localhost:8000/auth/callback?code=private-code&state=private-state "
         "code_verifier=private-verifier access_token=private-access "
         "refresh_token=private-refresh client_secret=private-client-secret "
@@ -46,6 +47,7 @@ def test_desktop_log_redacts_credentials_callback_queries_and_wallet_text(tmp_pa
     rendered = log_path.read_text(encoding="utf-8")
     assert "stage=token_exchange" in rendered
     assert "status=failed" in rendered
+    assert "error_code=safe_request_failed" in rendered
     assert "[REDACTED]" in rendered
     for sentinel in sentinels:
         assert sentinel not in rendered

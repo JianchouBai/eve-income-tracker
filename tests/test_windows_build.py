@@ -121,10 +121,13 @@ def test_build_pipeline_has_fail_fast_release_gates_and_scoped_cleanup():
     assert "Remove-Item $" not in script
     assert "Invoke-Expression" not in script
     assert "Start-Process" not in script
+    assert '[string]$ReleaseBase = ""' in script
     assert "$headCommit = (& git rev-parse HEAD).Trim()" in script
-    assert "$releaseBase = (& git merge-base origin/main HEAD).Trim()" in script
-    assert '$releaseBase = (& git rev-parse "HEAD^").Trim()' in script
+    assert "$mergeBaseOutput = @(& git merge-base origin/main HEAD)" in script
+    assert "ReleaseBase is required when HEAD equals origin/main" in script
+    assert '@("merge-base", "--is-ancestor", $releaseBase, "HEAD")' in script
     assert '@("diff", "--check", $releaseBase, "HEAD")' in script
+    assert 'rev-parse "HEAD^"' not in script
     assert "hash-object -t tree NUL" not in script
     assert '@("diff", "--check")' not in script
 
@@ -175,6 +178,8 @@ def test_readme_documents_reproducible_windows_installer_build():
         r"scripts\build_windows.ps1",
         "installer-output",
         "SHA-256",
+        "-ReleaseBase",
+        "上一个版本标签或提交",
         "不包含 Client Secret",
     ]:
         assert token in readme

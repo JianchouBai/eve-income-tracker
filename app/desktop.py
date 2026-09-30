@@ -422,7 +422,7 @@ class DesktopApplication:
                     succeeded = False
             if failure_code is not None and logging_active:
                 logging.getLogger(__name__).warning(
-                    "Desktop application failed: code=%s",
+                    "Desktop application failed: error_code=%s",
                     failure_code,
                 )
             if logging_active:

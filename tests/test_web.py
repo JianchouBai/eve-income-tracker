@@ -523,7 +523,9 @@ def test_callback_failure_logs_safe_stage_and_code(
         response = authorize(client, settings)
 
     assert response.status_code == 502
-    assert f"EVE authorization failed: stage={stage} code={code}" in caplog.messages
+    assert (
+        f"EVE authorization failed: stage={stage} error_code={code}" in caplog.messages
+    )
     assert "private-" not in caplog.text
 
 
@@ -555,7 +557,7 @@ def test_callback_logs_new_claim_category_without_sensitive_values(
 
     assert response.status_code == 502
     assert (
-        f"EVE authorization failed: stage=token_verification code={code}"
+        f"EVE authorization failed: stage=token_verification error_code={code}"
         in caplog.messages
     )
     assert "private-" not in caplog.text
