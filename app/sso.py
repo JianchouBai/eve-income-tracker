@@ -1,4 +1,7 @@
+import base64
+import hashlib
 import re
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -19,6 +22,28 @@ class SsoError(Exception):
         self.code = code
         self.user_message = user_message
         super().__init__(user_message)
+
+
+@dataclass(frozen=True)
+class PkcePair:
+    verifier: str = field(repr=False)
+    challenge: str
+
+    @classmethod
+    def generate(
+        cls,
+        random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+    ) -> "PkcePair":
+        entropy = random_bytes(32)
+        if not isinstance(entropy, bytes) or len(entropy) != 32:
+            raise ValueError("PKCE entropy source must return exactly 32 bytes")
+        verifier = base64.urlsafe_b64encode(entropy).decode().rstrip("=")
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+            .decode()
+            .rstrip("=")
+        )
+        return cls(verifier, challenge)
 
 
 @dataclass(frozen=True)
@@ -57,7 +82,9 @@ class SsoClient:
         self._jwks: list[dict] | None = None
         self._jwks_expires_at: datetime | None = None
 
-    async def build_authorization_url(self, state: str) -> str:
+    async def build_authorization_url(self, state: str, challenge: str) -> str:
+        self._validate_oauth_value(state)
+        self._validate_pkce_value(challenge)
         metadata = await self._discover()
         return (
             metadata.authorization_endpoint
@@ -69,26 +96,52 @@ class SsoClient:
                     "redirect_uri": self._settings.eve_callback_url,
                     "scope": WALLET_SCOPE,
                     "state": state,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
                 }
             )
         )
 
-    async def exchange_code(self, code: str) -> TokenSet:
+    async def exchange_code(self, code: str, verifier: str) -> TokenSet:
+        self._validate_oauth_value(code)
+        self._validate_pkce_value(verifier)
         return await self._request_tokens(
             {
                 "grant_type": "authorization_code",
                 "code": code,
                 "redirect_uri": self._settings.eve_callback_url,
+                "code_verifier": verifier,
+                "client_id": self._settings.eve_client_id,
             }
         )
 
     async def refresh(self, refresh_token: str) -> TokenSet:
+        self._validate_oauth_value(refresh_token)
         return await self._request_tokens(
             {
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
+                "client_id": self._settings.eve_client_id,
             }
         )
+
+    @staticmethod
+    def _validate_oauth_value(value: str) -> None:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 4096
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise SsoError("invalid_request", "EVE SSO request is invalid.")
+
+    @staticmethod
+    def _validate_pkce_value(value: str) -> None:
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{43}", value) is None
+        ):
+            raise SsoError("invalid_pkce", "EVE SSO request is invalid.")
 
     async def verify_access_token(self, access_token: str) -> CharacterIdentity:
         try:
@@ -242,10 +295,6 @@ class SsoClient:
             "POST",
             metadata.token_endpoint,
             data=data,
-            auth=httpx.BasicAuth(
-                self._settings.eve_client_id,
-                self._settings.eve_client_secret,
-            ),
         )
         try:
             access = payload["access_token"]

@@ -96,7 +96,6 @@ def context(tmp_path):
     settings = Settings(
         _env_file=None,
         eve_client_id="client-id",
-        eve_client_secret="private-client-secret",
         app_session_secret="session-secret-" * 4,
         app_encryption_key=Fernet.generate_key().decode(),
         database_path=tmp_path / "wallet.sqlite3",

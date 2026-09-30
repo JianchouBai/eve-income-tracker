@@ -38,7 +38,6 @@ def test_example_environment_covers_operational_settings_without_usable_secrets(
     values = dotenv_values(example)
     assert set(values) == {
         "EVE_CLIENT_ID",
-        "EVE_CLIENT_SECRET",
         "EVE_CALLBACK_URL",
         "APP_SESSION_SECRET",
         "APP_ENCRYPTION_KEY",
@@ -51,7 +50,6 @@ def test_example_environment_covers_operational_settings_without_usable_secrets(
     assert values["DATABASE_PATH"] == "data/eve_income.sqlite3"
     for name in [
         "EVE_CLIENT_ID",
-        "EVE_CLIENT_SECRET",
         "APP_SESSION_SECRET",
         "APP_ENCRYPTION_KEY",
     ]:

@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     resource_root: Path = PROJECT_ROOT
 
     eve_client_id: str = ""
-    eve_client_secret: str = ""
     eve_callback_url: str = "http://localhost:8000/auth/callback"
     app_session_secret: str = ""
     app_encryption_key: str = ""
@@ -51,8 +50,6 @@ class Settings(BaseSettings):
         issues = []
         if not self.eve_client_id.strip():
             issues.append("EVE_CLIENT_ID")
-        if not self.eve_client_secret.strip():
-            issues.append("EVE_CLIENT_SECRET")
         if not self._has_valid_callback_url():
             issues.append("EVE_CALLBACK_URL")
         if len(self.app_session_secret) < 32:
