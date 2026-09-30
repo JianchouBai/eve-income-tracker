@@ -4,6 +4,23 @@
 
 需要 **Python 3.11+**；下面的 Windows PowerShell 示例使用 Python 3.12。无需 Node.js、前端构建或外部数据库。页面资源保存在本地，真实授权与同步需要访问 EVE 官方 SSO/ESI 服务。
 
+## Windows 桌面入口（开发与构建验证）
+
+桌面版复用同一套 FastAPI、HTML、CSS 和 JavaScript。开发桌面入口需要额外安装锁定的 Windows 依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
+.\.venv\Scripts\python.exe -m app.desktop
+```
+
+桌面入口只监听 `127.0.0.1:8000`，窗口固定使用 EdgeChromium/WebView2；个人数据库、DPAPI 密钥、日志和备份保存在当前 Windows 用户的 `%LOCALAPPDATA%\EVE Income Tracker`。源码及打包产物可用以下命令执行不访问 EVE 的烟雾检查：
+
+```powershell
+.\.venv\Scripts\python.exe -m app.desktop --smoke-test
+```
+
+正常桌面启动读取随构建产物提供的公开 `release-config.json`，不读取 `.env`；命令行开发模式仍使用后文的 `.env` 和 Uvicorn 启动方式。
+
 ## 1. 创建虚拟环境
 
 在项目根目录打开 PowerShell：
