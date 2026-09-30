@@ -240,8 +240,12 @@ Write-Host "[gate] python -m pytest"
 Invoke-Checked $PythonExecutable @("-m", "pytest", "-q") "python -m pytest"
 Write-Host "[gate] ruff check app scripts tests"
 Invoke-Checked $PythonExecutable @("-m", "ruff", "check", "app", "scripts", "tests") "ruff check app scripts tests"
-Write-Host "[gate] git diff --check"
-Invoke-Checked "git" @("diff", "--check") "git diff --check"
+Write-Host "[gate] git diff --check (entire committed tree)"
+$emptyTree = (& git hash-object -t tree NUL).Trim()
+if ($LASTEXITCODE -ne 0 -or $emptyTree -notmatch "^[0-9a-f]{40,64}$") {
+    throw "Unable to determine the Git empty tree."
+}
+Invoke-Checked "git" @("diff", "--check", $emptyTree, "HEAD") "git diff --check"
 
 $buildWindowsPath = Join-Path $projectRoot "build\windows"
 $distWindowsPath = Join-Path $projectRoot "dist\windows"

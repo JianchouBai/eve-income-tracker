@@ -121,6 +121,9 @@ def test_build_pipeline_has_fail_fast_release_gates_and_scoped_cleanup():
     assert "Remove-Item $" not in script
     assert "Invoke-Expression" not in script
     assert "Start-Process" not in script
+    assert "$emptyTree = (& git hash-object -t tree NUL).Trim()" in script
+    assert '@("diff", "--check", $emptyTree, "HEAD")' in script
+    assert '@("diff", "--check")' not in script
 
 
 def test_build_pipeline_quotes_external_arguments_and_checks_exact_artifacts():
@@ -145,6 +148,17 @@ def test_generated_and_release_outputs_are_ignored_and_scoped():
     assert "build/" in ignored
     assert "dist/" in ignored
     assert "installer-output/" in ignored
+    for pattern in [
+        "*.sqlite",
+        "*.sqlite-*",
+        "*.sqlite3-*",
+        "*.db",
+        "*.db-*",
+        "*-wal",
+        "*-shm",
+        "*-journal",
+    ]:
+        assert pattern in ignored
 
 
 def test_readme_documents_reproducible_windows_installer_build():

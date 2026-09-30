@@ -248,6 +248,7 @@ def test_readme_documents_desktop_and_frozen_smoke_commands():
     assert "python.exe -m app.desktop --smoke-test" in readme
     assert "%LOCALAPPDATA%\\EVE Income Tracker" in readme
 
+
 def test_readme_leads_with_installed_windows_operation_contract():
     readme = read_readme()
 
@@ -267,6 +268,8 @@ def test_readme_leads_with_installed_windows_operation_contract():
         "同时删除个人数据",
         "手动创建 GitHub Release",
         "未知发布者",
+        "重置本机授权",
+        "::1",
     ]:
         assert statement in installed_section
 
@@ -311,5 +314,6 @@ def test_windows_release_checklist_covers_desktop_acceptance_contract():
         "删除个人数据",
         "第二台干净电脑",
         "卸载",
+        "损坏密钥",
     ]:
         assert statement in checklist

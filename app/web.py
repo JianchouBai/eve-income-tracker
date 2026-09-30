@@ -18,7 +18,11 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, field_validator
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.auth_attempts import AuthorizationAttemptError, AuthorizationAttemptStore
+from app.auth_attempts import (
+    ATTEMPT_LIFETIME,
+    AuthorizationAttemptError,
+    AuthorizationAttemptStore,
+)
 from app.config import Settings
 from app.desktop_session import DesktopLaunchTokenStore, DesktopSessionError
 from app.esi import EsiError
@@ -379,6 +383,7 @@ def create_app(
             {
                 "attempt_id": attempt.attempt_id,
                 "authorization_url": authorization_url,
+                "expires_in_seconds": int(ATTEMPT_LIFETIME.total_seconds()),
             },
             status_code=201,
         )

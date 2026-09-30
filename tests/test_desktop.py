@@ -58,6 +58,13 @@ class FakeLifecycle:
         if self.failure in failures:
             raise DatabaseLifecycleError(failures[self.failure])
 
+    def reset_authorization(self):
+        self.events.append("reset_authorization")
+        return "authorization-reset"
+
+    def rollback_authorization_reset(self, reset):
+        self.events.append(("rollback_authorization", reset))
+
 
 class FakeKeyStore:
     def __init__(self, events, failure=None):
@@ -66,8 +73,14 @@ class FakeKeyStore:
 
     def load_or_create(self):
         self.events.append("key")
-        if self.failure == "key":
+        if self.failure in {"key", "key_replace"}:
             raise KeyStoreError("key_corrupt")
+        return Fernet.generate_key()
+
+    def replace_corrupt(self, backup_dir):
+        self.events.append(("replace_key", Path(backup_dir)))
+        if self.failure == "key_replace":
+            raise KeyStoreError("key_unwritable")
         return Fernet.generate_key()
 
 
@@ -475,6 +488,97 @@ def test_failed_real_import_changes_neither_source_nor_target(tmp_path):
         event[1] for event in events if isinstance(event, tuple) and event[0] == "error"
     )
     assert "导入" in error
+
+
+def test_corrupt_key_recovery_requires_confirmation_and_preserves_application_data(
+    tmp_path,
+):
+    events = []
+    dependencies, paths, _, _ = recording_dependencies(
+        tmp_path,
+        events,
+        failure="key",
+        ask=True,
+    )
+    paths.database_path.parent.mkdir(parents=True)
+    paths.database_path.write_bytes(b"existing-database")
+
+    result = DesktopApplication(
+        local_app_data=tmp_path,
+        dependencies=dependencies,
+    ).run()
+
+    assert result == 0
+    recovery_question = next(
+        event[1]
+        for event in events
+        if isinstance(event, tuple) and event[0] == "ask" and "重置本机授权" in event[1]
+    )
+    assert "角色、分组和钱包历史" in recovery_question
+    names = [event[0] if isinstance(event, tuple) else event for event in events]
+    assert names.index("key") < names.index("ask")
+    assert names.index("ask") < names.index("prepare")
+    assert names.index("prepare") < names.index("reset_authorization")
+    assert names.index("reset_authorization") < names.index("replace_key")
+    assert ("replace_key", paths.backups_dir) in events
+    assert not any(isinstance(event, tuple) and event[0] == "error" for event in events)
+
+
+def test_declining_corrupt_key_recovery_exits_without_resetting_data(tmp_path):
+    events = []
+    dependencies, paths, _, _ = recording_dependencies(
+        tmp_path,
+        events,
+        failure="key",
+        ask=False,
+    )
+    paths.database_path.parent.mkdir(parents=True)
+    original = b"existing-database"
+    paths.database_path.write_bytes(original)
+
+    result = DesktopApplication(
+        local_app_data=tmp_path,
+        dependencies=dependencies,
+    ).run()
+
+    assert result == 1
+    assert paths.database_path.read_bytes() == original
+    assert "reset_authorization" not in events
+    assert not any(
+        isinstance(event, tuple) and event[0] == "replace_key" for event in events
+    )
+    questions = [
+        event[1] for event in events if isinstance(event, tuple) and event[0] == "ask"
+    ]
+    assert len(questions) == 1
+    assert "重置本机授权" in questions[0]
+
+
+def test_failed_corrupt_key_replacement_rolls_back_authorization_reset(tmp_path):
+    events = []
+    dependencies, paths, _, _ = recording_dependencies(
+        tmp_path,
+        events,
+        failure="key_replace",
+        ask=True,
+    )
+    paths.database_path.parent.mkdir(parents=True)
+    paths.database_path.write_bytes(b"existing-database")
+
+    result = DesktopApplication(
+        local_app_data=tmp_path,
+        dependencies=dependencies,
+    ).run()
+
+    assert result == 1
+    assert (
+        "rollback_authorization",
+        "authorization-reset",
+    ) in events
+    names = [event[0] if isinstance(event, tuple) else event for event in events]
+    assert names.index("reset_authorization") < names.index("replace_key")
+    assert names.index("replace_key") < names.index("rollback_authorization")
+    assert "server_start" not in events
 
 
 @pytest.mark.parametrize(

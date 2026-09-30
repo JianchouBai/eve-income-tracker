@@ -320,7 +320,8 @@ def test_desktop_authorization_api_requires_csrf_and_returns_no_verifier(context
         )
         assert response.status_code == 201
         payload = response.json()
-        assert set(payload) == {"attempt_id", "authorization_url"}
+        assert set(payload) == {"attempt_id", "authorization_url", "expires_in_seconds"}
+        assert payload["expires_in_seconds"] == 600
         assert "private-" not in response.text
         assert "code_challenge_method=S256" in payload["authorization_url"]
         assert services.sso.authorization_calls

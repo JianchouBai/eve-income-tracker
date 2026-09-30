@@ -3,6 +3,14 @@
 .venv/
 data/
 *.sqlite3
+*.sqlite
+*.sqlite-*
+*.sqlite3-*
+*.db
+*.db-*
+*-wal
+*-shm
+*-journal
 __pycache__/
 .pytest_cache/
 .ruff_cache/

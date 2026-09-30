@@ -75,6 +75,12 @@ class ImportResult:
     journal_entries_imported: int
 
 
+@dataclass(frozen=True)
+class AuthorizationResetResult:
+    character_count: int
+    backup_path: Path
+
+
 def _read_only_connection(path: Path) -> sqlite3.Connection:
     uri = path.resolve().as_uri() + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=0)
@@ -131,6 +137,42 @@ def _copy_to_temporary(source: Path, directory: Path, prefix: str) -> Path:
             shutil.copyfileobj(input_file, output)
             output.flush()
             os.fsync(output.fileno())
+        return temporary_path
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        if temporary_path is not None:
+            _remove_sqlite_temporary_files(temporary_path)
+        raise
+
+
+def _snapshot_sqlite_to_temporary(
+    source: Path,
+    directory: Path,
+    prefix: str,
+) -> Path:
+    fd = -1
+    temporary_path: Path | None = None
+    try:
+        fd, raw_path = tempfile.mkstemp(
+            prefix=prefix,
+            suffix=".tmp",
+            dir=directory,
+        )
+        temporary_path = Path(raw_path)
+        os.close(fd)
+        fd = -1
+        source_connection = _read_only_connection(source)
+        try:
+            destination_connection = sqlite3.connect(temporary_path)
+            try:
+                source_connection.backup(destination_connection)
+                destination_connection.commit()
+            finally:
+                destination_connection.close()
+        finally:
+            source_connection.close()
+        _flush_file(temporary_path)
         return temporary_path
     except BaseException:
         if fd >= 0:
@@ -209,12 +251,12 @@ class DatabaseLifecycle:
         source_version = self._inspect_import_source(source_path)
         try:
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_path = _copy_to_temporary(
+            temporary_path = _snapshot_sqlite_to_temporary(
                 source_path,
                 target_path.parent,
                 f".{target_path.name}.import-",
             )
-        except OSError:
+        except (OSError, sqlite3.Error):
             raise DatabaseLifecycleError("import_failed") from None
 
         try:
@@ -245,6 +287,49 @@ class DatabaseLifecycle:
             raise DatabaseLifecycleError("import_failed") from None
         finally:
             _remove_sqlite_temporary_files(temporary_path)
+
+    def reset_authorization(self) -> AuthorizationResetResult:
+        version = self._inspect_target()
+        if version != LATEST_SCHEMA_VERSION:
+            raise DatabaseLifecycleError("authorization_reset_failed")
+
+        backup = self._create_backup(version)
+        try:
+            character_count, _ = self._invalidate_credentials(self.database.path)
+            if (
+                self.database.inspect_version() != LATEST_SCHEMA_VERSION
+                or not _schema_is_supported(
+                    self.database.path,
+                    LATEST_SCHEMA_VERSION,
+                )
+            ):
+                raise sqlite3.DatabaseError("authorization reset validation failed")
+        except Exception:  # noqa: BLE001 - restore and sanitize reset failures.
+            try:
+                self._restore_backup(backup)
+            except OSError:
+                raise DatabaseLifecycleError("database_restore_failed") from None
+            raise DatabaseLifecycleError("authorization_reset_failed") from None
+
+        self._prune_backups()
+        return AuthorizationResetResult(character_count, backup)
+
+    def rollback_authorization_reset(
+        self,
+        reset: AuthorizationResetResult,
+    ) -> None:
+        try:
+            self._restore_backup(reset.backup_path)
+            if (
+                self.database.inspect_version() != LATEST_SCHEMA_VERSION
+                or not _schema_is_supported(
+                    self.database.path,
+                    LATEST_SCHEMA_VERSION,
+                )
+            ):
+                raise sqlite3.DatabaseError("authorization rollback validation failed")
+        except Exception:  # noqa: BLE001 - restore and sanitize rollback failures.
+            raise DatabaseLifecycleError("database_restore_failed") from None
 
     def _inspect_target(self) -> int:
         try:

@@ -48,6 +48,12 @@ FIRST_RUN_QUESTION = (
     "首次使用时，是否从当前命令行版导入旧数据库？\n"
     "选择“否”或取消后，将为这台电脑创建新的独立数据库。"
 )
+KEY_RECOVERY_QUESTION = (
+    "本机授权密钥已损坏或无法由当前 Windows 用户解密。是否重置本机授权？\n\n"
+    "选择“是”将先备份数据库和损坏密钥，清除已保存的角色授权令牌；"
+    "角色、分组和钱包历史会保留，之后需要逐个重新授权。\n"
+    "选择“否”将退出且不修改授权数据。"
+)
 SMOKE_SUCCESS = "DESKTOP_SMOKE_OK healthz=200 home=200 resources=ok database=ok"
 SMOKE_RESULT_NAME = "desktop-smoke-result.txt"
 
@@ -73,13 +79,16 @@ _ERROR_MESSAGES = {
         "无法创建本机数据库。请检查 LocalAppData 的可用空间与写入权限。"
     ),
     "backup_unwritable": (
-        "升级前无法创建数据库备份。原数据库未修改，请检查备份目录权限。"
+        "无法创建数据库安全备份。原数据库未修改，请检查备份目录权限。"
     ),
     "migration_failed": (
         "数据库升级失败，已尝试恢复原文件。请保留日志和备份后再重试。"
     ),
     "database_restore_failed": (
-        "数据库升级失败且无法自动恢复。请停止操作并从 backups 目录恢复。"
+        "数据库操作失败且无法自动恢复。请停止操作并从 backups 目录恢复。"
+    ),
+    "authorization_reset_failed": (
+        "重置角色授权失败，数据库已恢复。请保留日志和备份后重试。"
     ),
     "import_failed": ("旧数据库导入失败，源文件未修改。请确认文件未被占用后重试。"),
     "config_invalid": ("安装包中的公开发布配置无效。请重新安装正式构建的应用。"),
@@ -314,11 +323,28 @@ class DesktopApplication:
                     lifecycle.import_legacy(source)
 
             protector = dependencies.protector_factory()
-            key = dependencies.key_store_factory(
+            key_store = dependencies.key_store_factory(
                 paths.key_path,
                 protector,
-            ).load_or_create()
-            lifecycle.prepare()
+            )
+            try:
+                key = key_store.load_or_create()
+            except KeyStoreError as error:
+                if (
+                    self._smoke_test
+                    or error.code != "key_corrupt"
+                    or not dependencies.question_asker(KEY_RECOVERY_QUESTION)
+                ):
+                    raise
+                lifecycle.prepare()
+                reset = lifecycle.reset_authorization()
+                try:
+                    key = key_store.replace_corrupt(paths.backups_dir)
+                except Exception:
+                    lifecycle.rollback_authorization_reset(reset)
+                    raise
+            else:
+                lifecycle.prepare()
 
             release = (
                 _smoke_release_config()

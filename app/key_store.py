@@ -192,3 +192,69 @@ class FernetKeyStore:
                     temporary_path.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    def replace_corrupt(self, backup_dir: Path) -> bytes:
+        try:
+            corrupt_bytes = self._path.read_bytes()
+        except OSError:
+            raise KeyStoreError("key_unreadable") from None
+
+        try:
+            key = validate_fernet_key(self._key_factory())
+        except Exception:  # noqa: BLE001 - sanitize key factory failures.
+            raise KeyStoreError("key_generation_failed") from None
+
+        try:
+            protected = self._protector.protect(key)
+            if not isinstance(protected, bytes) or not protected:
+                raise ValueError
+        except Exception:  # noqa: BLE001 - sanitize DPAPI backend failures.
+            raise KeyStoreError("key_protection_failed") from None
+
+        backup_root = Path(backup_dir)
+        temporary_path: Path | None = None
+        backup_path: Path | None = None
+        backup_complete = False
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            backup_root.mkdir(parents=True, exist_ok=True)
+
+            fd, raw_temporary_path = tempfile.mkstemp(
+                prefix=f".{self._path.name}.reset-",
+                suffix=".tmp",
+                dir=self._path.parent,
+            )
+            temporary_path = Path(raw_temporary_path)
+            with os.fdopen(fd, "wb") as temporary_file:
+                temporary_file.write(protected)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+
+            backup_fd, raw_backup_path = tempfile.mkstemp(
+                prefix="local-key-corrupt-",
+                suffix=".bin",
+                dir=backup_root,
+            )
+            backup_path = Path(raw_backup_path)
+            with os.fdopen(backup_fd, "wb") as backup_file:
+                backup_file.write(corrupt_bytes)
+                backup_file.flush()
+                os.fsync(backup_file.fileno())
+            backup_complete = True
+
+            os.replace(temporary_path, self._path)
+            temporary_path = None
+            return key
+        except OSError:
+            raise KeyStoreError("key_unwritable") from None
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if backup_path is not None and not backup_complete:
+                try:
+                    backup_path.unlink(missing_ok=True)
+                except OSError:
+                    pass

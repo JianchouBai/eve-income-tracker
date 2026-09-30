@@ -16,7 +16,7 @@ _NAMED_SECRET = re.compile(
     r"""(?ix)
     (
         ['"]?
-        (?:state|code_verifier|access_token|refresh_token|client_secret|
+        (?:code|state|code_verifier|access_token|refresh_token|client_secret|
            app_encryption_key|encryption_key|fernet_key|key|token|
            cookie|description|password)
         ['"]?

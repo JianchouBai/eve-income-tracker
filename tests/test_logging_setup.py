@@ -16,6 +16,7 @@ def test_desktop_log_redacts_credentials_callback_queries_and_wallet_text(tmp_pa
     log_path = tmp_path / "日志" / "eve-income-tracker.log"
     sentinels = [
         "private-code",
+        "private-standalone-code",
         "private-state",
         "private-verifier",
         "private-access",
@@ -31,7 +32,7 @@ def test_desktop_log_redacts_credentials_callback_queries_and_wallet_text(tmp_pa
     module.configure_desktop_logging(log_path)
     logger = logging.getLogger("app.desktop.redaction_test")
     logger.info(
-        "stage=token_exchange status=failed "
+        "stage=token_exchange status=failed code=private-standalone-code "
         "url=http://localhost:8000/auth/callback?code=private-code&state=private-state "
         "code_verifier=private-verifier access_token=private-access "
         "refresh_token=private-refresh client_secret=private-client-secret "

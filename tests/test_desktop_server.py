@@ -60,6 +60,43 @@ def test_occupied_port_is_reported_without_closing_or_killing_owner():
         owner.close()
 
 
+@pytest.mark.skipif(not socket.has_ipv6, reason="IPv6 loopback is unavailable")
+def test_real_server_owns_ipv6_loopback_on_the_same_port():
+    server = LocalServer(healthy_app(), port=0)
+    try:
+        port = server.start()
+        wait_until_healthy(server, timeout=3)
+        with socket.create_connection(("::1", port), timeout=1):
+            pass
+    finally:
+        assert server.stop(timeout=3) is True
+
+
+@pytest.mark.skipif(not socket.has_ipv6, reason="IPv6 loopback is unavailable")
+def test_ipv6_occupied_port_is_reported_and_ipv4_listener_is_released():
+    owner = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    owner.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    owner.bind(("::1", 0))
+    owner.listen()
+    port = owner.getsockname()[1]
+    server = LocalServer(healthy_app(), port=port)
+
+    try:
+        with pytest.raises(LocalServerError) as caught:
+            server.start()
+        assert caught.value.code == "port_unavailable"
+        assert owner.fileno() >= 0
+
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind((LOOPBACK_HOST, port))
+        finally:
+            probe.close()
+    finally:
+        server.stop()
+        owner.close()
+
+
 def test_wait_detects_server_thread_that_exits_before_health():
     class ExitingServer:
         should_exit = False

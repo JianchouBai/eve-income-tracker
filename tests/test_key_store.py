@@ -195,6 +195,52 @@ def test_unwritable_new_key_reports_safe_error_without_partial_file(
     assert "private-" not in str(caught.value)
 
 
+def test_corrupt_key_can_be_explicitly_replaced_with_preserved_backup(tmp_path):
+    module = key_store_module()
+    path = tmp_path / "config" / "local.key"
+    path.parent.mkdir()
+    corrupt = b"private-corrupt-protected-key"
+    path.write_bytes(corrupt)
+    replacement = Fernet.generate_key()
+    store = module.FernetKeyStore(
+        path,
+        PrefixProtector(),
+        key_factory=lambda: replacement,
+    )
+
+    loaded = store.replace_corrupt(tmp_path / "backups")
+
+    assert loaded == replacement
+    assert path.read_bytes() == b"protected:" + replacement[::-1]
+    assert replacement not in path.read_bytes()
+    backups = list((tmp_path / "backups").glob("local-key-corrupt-*.bin"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == corrupt
+    assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_failed_corrupt_key_replacement_keeps_original(tmp_path, monkeypatch):
+    module = key_store_module()
+    path = tmp_path / "config" / "local.key"
+    path.parent.mkdir()
+    corrupt = b"private-corrupt-protected-key"
+    path.write_bytes(corrupt)
+    store = module.FernetKeyStore(path, PrefixProtector())
+
+    def denied(source, destination):
+        raise PermissionError("private-replace-details")
+
+    monkeypatch.setattr(module.os, "replace", denied)
+
+    with pytest.raises(module.KeyStoreError) as caught:
+        store.replace_corrupt(tmp_path / "backups")
+
+    assert caught.value.code == "key_unwritable"
+    assert path.read_bytes() == corrupt
+    assert list(path.parent.glob("*.tmp")) == []
+    assert "private-" not in f"{caught.value!s} {caught.value!r}"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows DPAPI is Windows-only")
 def test_windows_dpapi_round_trips_only_protected_bytes():
     module = key_store_module()

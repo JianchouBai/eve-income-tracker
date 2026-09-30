@@ -298,6 +298,131 @@ def test_import_v2_preserves_history_and_structure_but_requires_reauthorization(
     ) == [expected_entry]
 
 
+def test_import_includes_committed_wal_rows_without_mutating_live_source(tmp_path):
+    source = tmp_path / "legacy.sqlite3"
+    target = tmp_path / "desktop" / "eve_income.sqlite3"
+    Database(source).initialize()
+    writer = sqlite3.connect(source)
+    try:
+        assert writer.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        writer.execute(
+            "INSERT INTO character_groups(name, created_at) VALUES (?, ?)",
+            ("WAL group", "2026-09-30T00:00:00.000000+00:00"),
+        )
+        group_id = writer.execute(
+            "SELECT group_id FROM character_groups WHERE name = ?",
+            ("WAL group",),
+        ).fetchone()[0]
+        writer.execute(
+            "INSERT INTO characters VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                9001,
+                "WAL Pilot",
+                "private-wal-refresh-token",
+                1,
+                0,
+                "2026-09-30T00:00:00.000000+00:00",
+                None,
+                group_id,
+            ),
+        )
+        writer.commit()
+        wal_path = source.with_name(f"{source.name}-wal")
+        assert wal_path.is_file()
+        source_before = source.read_bytes()
+        wal_before = wal_path.read_bytes()
+
+        result = DatabaseLifecycle(
+            Database(target), tmp_path / "backups"
+        ).import_legacy(source)
+
+        assert result.characters_imported == 1
+        assert source.read_bytes() == source_before
+        assert wal_path.read_bytes() == wal_before
+        character = CharacterRepository(Database(target)).list_all()[0]
+        assert character.character_id == 9001
+        assert character.group_id == group_id
+        assert character.encrypted_refresh_token == ""
+        assert character.authorization_required is True
+    finally:
+        writer.close()
+
+
+def test_reset_authorization_backs_up_and_preserves_history(tmp_path):
+    path = tmp_path / "data" / "eve_income.sqlite3"
+    path.parent.mkdir()
+    expected_group, expected_entry = create_version_two_source(path)
+    original = path.read_bytes()
+    lifecycle = DatabaseLifecycle(
+        Database(path), tmp_path / "backups", clock=fixed_clock
+    )
+
+    reset = lifecycle.reset_authorization()
+
+    assert reset.character_count == 1
+    backups = list((tmp_path / "backups").iterdir())
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original
+    character = CharacterRepository(Database(path)).list_all()[0]
+    assert character.encrypted_refresh_token == ""
+    assert character.authorization_required is True
+    assert character.group_id == expected_group.group_id
+    assert JournalRepository(Database(path)).list_for_report(
+        {character.character_id},
+        datetime(2026, 9, 3, tzinfo=UTC),
+        datetime(2026, 9, 4, tzinfo=UTC),
+    ) == [expected_entry]
+
+
+def test_failed_authorization_reset_restores_exact_database_bytes(tmp_path):
+    path = tmp_path / "data" / "eve_income.sqlite3"
+    path.parent.mkdir()
+    create_version_two_source(path)
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "CREATE TRIGGER reject_authorization_reset "
+            "BEFORE UPDATE OF encrypted_refresh_token ON characters "
+            "BEGIN SELECT RAISE(ABORT, 'private-reject'); END"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    original = path.read_bytes()
+    lifecycle = DatabaseLifecycle(
+        Database(path), tmp_path / "backups", clock=fixed_clock
+    )
+
+    with pytest.raises(DatabaseLifecycleError) as caught:
+        lifecycle.reset_authorization()
+
+    assert caught.value.code == "authorization_reset_failed"
+    assert path.read_bytes() == original
+    assert [item.read_bytes() for item in (tmp_path / "backups").iterdir()] == [
+        original
+    ]
+    assert "private-" not in f"{caught.value!s} {caught.value!r}"
+
+
+def test_authorization_reset_can_be_rolled_back_after_key_failure(tmp_path):
+    path = tmp_path / "data" / "eve_income.sqlite3"
+    path.parent.mkdir()
+    create_version_two_source(path)
+    original = path.read_bytes()
+    lifecycle = DatabaseLifecycle(
+        Database(path), tmp_path / "backups", clock=fixed_clock
+    )
+
+    reset = lifecycle.reset_authorization()
+    assert path.read_bytes() != original
+
+    lifecycle.rollback_authorization_reset(reset)
+
+    assert path.read_bytes() == original
+    assert reset.backup_path.read_bytes() == original
+
+
 def test_import_refuses_existing_target_without_touching_either_database(tmp_path):
     source = tmp_path / "legacy.sqlite3"
     target = tmp_path / "desktop.sqlite3"

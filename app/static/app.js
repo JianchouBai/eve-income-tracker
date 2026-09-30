@@ -77,7 +77,12 @@ async function startDesktopAuthorization(event) {
       headers: { 'X-CSRF-Token': csrf },
     });
     await window.pywebview.api.open_authorization_url(started.authorization_url);
-    for (let poll = 0; poll < 120; poll += 1) {
+    const expiresInSeconds = started.expires_in_seconds;
+    if (!Number.isInteger(expiresInSeconds) || expiresInSeconds <= 0 || expiresInSeconds > 3600) {
+      throw new Error('授权有效期无效。');
+    }
+    const deadline = Date.now() + expiresInSeconds * 1000;
+    while (Date.now() < deadline) {
       await waitForAuthorizationPoll();
       const status = await request('/api/authorization-attempts/' + started.attempt_id);
       if (status.status === 'succeeded') {

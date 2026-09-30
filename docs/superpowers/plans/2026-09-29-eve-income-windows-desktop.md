@@ -14,7 +14,7 @@
 
 - Work only in .worktrees/windows-desktop-app on feature/windows-desktop-app.
 - Installed use requires no Python and shows no console. Development Uvicorn mode remains available.
-- Desktop server is one worker on 127.0.0.1:8000 with access logging off.
+- Desktop server is one worker on both 127.0.0.1:8000 and [::1]:8000 with access logging off.
 - Installed data lives only below %LOCALAPPDATA%\EVE Income Tracker; installation files are read-only.
 - Every computer owns an independent database, key, auth state, logs, and backups.
 - Remove Client Secret everywhere; use PKCE S256 and the public Client ID.
@@ -134,7 +134,7 @@
 - [ ] Test bridge accepts only HTTPS login.eveonline.com, absent/443 port, no userinfo; rejects HTTP/lookalikes/whitespace/other ports/local/file/shell before opener.
 - [ ] Run py -3.12 -m pytest tests/test_windows_runtime.py tests/test_desktop_server.py tests/test_desktop_bridge.py -v. Expected: missing modules fail.
 - [ ] Implement import-safe ctypes wrappers, user mutex, official registry checks, OPENFILENAMEW FILEMUSTEXIST/PATHMUSTEXIST, and safe logging.
-- [ ] Implement one-worker 127.0.0.1:8000 Uvicorn with no access log; health uses trust_env=False, no redirects, short timeout, liveness check.
+- [ ] Implement one-worker dual-loopback 127.0.0.1:8000 and [::1]:8000 Uvicorn with no access log; health uses trust_env=False, no redirects, short timeout, liveness check.
 - [ ] Expose only allow-listed URL opening. Run focused/full tests and Ruff. Commit: feat: add Windows desktop runtime primitives.
 
 ### Task 7: First Run and Desktop Bootstrap

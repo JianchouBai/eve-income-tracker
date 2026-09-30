@@ -10,6 +10,7 @@ import httpx
 import uvicorn
 
 LOOPBACK_HOST = "127.0.0.1"
+IPV6_LOOPBACK_HOST = "::1"
 DEFAULT_PORT = 8000
 
 
@@ -32,7 +33,7 @@ class LocalServer:
         server_factory: Callable[[uvicorn.Config], Any] = uvicorn.Server,
     ) -> None:
         if host != LOOPBACK_HOST:
-            raise ValueError("desktop server must bind only to 127.0.0.1")
+            raise ValueError("desktop server must bind only to loopback")
         if not isinstance(port, int) or not 0 <= port <= 65535:
             raise ValueError("port is invalid")
         self.host = host
@@ -49,10 +50,40 @@ class LocalServer:
         )
         self._server_factory = server_factory
         self._server: Any | None = None
-        self._socket: socket.socket | None = None
+        self._sockets: list[socket.socket] = []
         self._thread: threading.Thread | None = None
         self._thread_failure = False
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _open_listener(
+        family: socket.AddressFamily,
+        address: tuple[str, int],
+    ) -> socket.socket:
+        listener = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            if family == socket.AF_INET6:
+                listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                listener.setsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_EXCLUSIVEADDRUSE,
+                    1,
+                )
+            listener.bind(address)
+            listener.listen(2048)
+            return listener
+        except OSError:
+            listener.close()
+            raise
+
+    @staticmethod
+    def _close_listeners(listeners: list[socket.socket]) -> None:
+        for listener in listeners:
+            try:
+                listener.close()
+            except OSError:
+                pass
 
     def start(self) -> int:
         with self._lock:
@@ -60,22 +91,26 @@ class LocalServer:
                 return self.port
             if self._thread is not None:
                 raise LocalServerError("server_cannot_restart")
-            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listeners: list[socket.socket] = []
             try:
-                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-                    listener.setsockopt(
-                        socket.SOL_SOCKET,
-                        socket.SO_EXCLUSIVEADDRUSE,
-                        1,
+                ipv4_listener = self._open_listener(
+                    socket.AF_INET,
+                    (self.host, self.port),
+                )
+                listeners.append(ipv4_listener)
+                selected_port = ipv4_listener.getsockname()[1]
+                listeners.append(
+                    self._open_listener(
+                        socket.AF_INET6,
+                        (IPV6_LOOPBACK_HOST, selected_port),
                     )
-                listener.bind((self.host, self.port))
-                listener.listen(2048)
+                )
             except OSError:
-                listener.close()
+                self._close_listeners(listeners)
                 raise LocalServerError("port_unavailable") from None
-            self.port = listener.getsockname()[1]
+            self.port = selected_port
             self.config.port = self.port
-            self._socket = listener
+            self._sockets = listeners
             self._server = self._server_factory(self.config)
             self._thread = threading.Thread(
                 target=self._serve,
@@ -87,16 +122,12 @@ class LocalServer:
 
     def _serve(self) -> None:
         try:
-            self._server.run(sockets=[self._socket])
+            self._server.run(sockets=list(self._sockets))
         except BaseException:  # noqa: BLE001 - thread failure is surfaced as a safe code.
             self._thread_failure = True
         finally:
-            listener, self._socket = self._socket, None
-            if listener is not None:
-                try:
-                    listener.close()
-                except OSError:
-                    pass
+            listeners, self._sockets = self._sockets, []
+            self._close_listeners(listeners)
 
     def wait_until_healthy(
         self,
@@ -145,12 +176,7 @@ class LocalServer:
         if thread.is_alive():
             if server is not None:
                 server.force_exit = True
-            listener = self._socket
-            if listener is not None:
-                try:
-                    listener.close()
-                except OSError:
-                    pass
+            self._close_listeners(list(self._sockets))
             thread.join(min(timeout, 0.1))
         return not thread.is_alive()
 

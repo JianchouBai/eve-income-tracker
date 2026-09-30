@@ -278,6 +278,8 @@ def test_desktop_authorization_script_uses_only_allowlisted_bridge_and_bounded_p
         "授权未完成，请重试。",
     ]:
         assert token in script
-    assert "for (let poll = 0; poll < 120; poll += 1)" in script
+    assert "started.expires_in_seconds" in script
+    assert "Date.now() < deadline" in script
+    assert "for (let poll = 0; poll < 120; poll += 1)" not in script
     assert "window.open(" not in script
     assert "href='/auth/login'" in page
