@@ -19,7 +19,11 @@ from scripts.build_support import (
     write_release_config,
     write_windows_version_info,
 )
-from scripts.generate_windows_icon import ICON_SIZES, generate_windows_icon
+from scripts.generate_windows_icon import (
+    ICON_SIZES,
+    PNG_SIGNATURE,
+    generate_windows_icon,
+)
 from scripts.smoke_desktop import FrozenSmokeError, run_frozen_smoke
 
 
@@ -168,6 +172,7 @@ def test_packaging_manifest_and_spec_include_only_windows_edge_resources(tmp_pat
     assert "webview.platforms.edgechromium" in hidden
     assert "webview.platforms.winforms" in hidden
     assert "clr" in hidden
+    assert "webview.platforms.webview2core" not in hidden
     assert {"pyqt5", "pyqt6", "pyside2", "pyside6", "cefpython3"} <= excluded
     assert manifest.release_config == generated / "release-config.json"
     assert manifest.icon == generated / "app-icon.ico"
@@ -190,6 +195,8 @@ def test_packaging_manifest_and_spec_include_only_windows_edge_resources(tmp_pat
     ]:
         assert token in spec
     assert "onefile" not in spec.lower()
+    assert "ROOT = Path(SPECPATH).parent.resolve()" in spec
+    assert "Path(SPECPATH).parent.parent" not in spec
 
 
 def test_source_icon_is_self_contained_vector_asset():
@@ -312,6 +319,26 @@ def test_frozen_smoke_failures_are_safe_and_clean_owned_directory(
     assert owned_paths and not owned_paths[0].exists()
 
 
+def test_real_windows_icon_renderer_produces_all_sizes(tmp_path):
+    pytest.importorskip("resvg_py")
+    output = tmp_path / "real.ico"
+
+    generate_windows_icon(Path("assets/app-icon.svg"), output)
+
+    data = output.read_bytes()
+    _, image_type, count = struct.unpack_from("<HHH", data)
+    assert image_type == 1
+    assert count == len(ICON_SIZES)
+    entries = [
+        struct.unpack_from("<BBBBHHII", data, 6 + index * 16) for index in range(count)
+    ]
+    assert [256 if entry[0] == 0 else entry[0] for entry in entries] == list(ICON_SIZES)
+    for entry in entries:
+        payload_size, offset = entry[6], entry[7]
+        payload = data[offset : offset + payload_size]
+        assert payload.startswith(PNG_SIGNATURE)
+
+
 def test_build_requirements_pin_pyinstaller_and_one_icon_generator():
     requirements = (
         Path("requirements-build.txt").read_text(encoding="utf-8").splitlines()
@@ -320,5 +347,5 @@ def test_build_requirements_pin_pyinstaller_and_one_icon_generator():
     assert requirements == [
         "-r requirements-windows.txt",
         "pyinstaller==6.22.3",
-        "CairoSVG==2.9.1",
+        "resvg_py==0.5.0",
     ]

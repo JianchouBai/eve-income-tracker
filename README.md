@@ -21,6 +21,30 @@
 
 正常桌面启动读取随构建产物提供的公开 `release-config.json`，不读取 `.env`；命令行开发模式仍使用后文的 `.env` 和 Uvicorn 启动方式。
 
+## Windows 安装包构建（维护者）
+
+发布构建要求 64 位 Windows、64 位 Python 3.12、锁定的 `requirements-build.txt` 依赖，以及带官方简体中文语言文件的 Inno Setup 7。先从微软官方页面下载 Evergreen Bootstrapper，保持文件名为 `vendor\MicrosoftEdgeWebview2Setup.exe`；构建脚本会校验其 Microsoft Authenticode 签名。
+
+在项目根目录创建被 Git 忽略的 `release-config.local.json`，其中只能包含公开 Client ID、固定回调地址、带联系邮箱的 User-Agent 和 ESI 兼容日期，不包含 Client Secret：
+
+```json
+{
+  "eve_client_id": "在 EVE Developers Portal 注册的公开 Client ID",
+  "eve_callback_url": "http://localhost:8000/auth/callback",
+  "eve_user_agent": "eve-income-tracker/0.1 (你的有效联系邮箱)",
+  "esi_compatibility_date": "2026-05-19"
+}
+```
+
+安装构建依赖后，从干净的发布提交运行：
+
+```powershell
+py -3.12 -m pip install -r requirements-build.txt
+.\scripts\build_windows.ps1
+```
+
+脚本依次运行全量测试、Ruff 和 Git 差异检查，生成公开配置、图标与版本资源，构建 PyInstaller onedir，使用隔离 LocalAppData 执行冻结烟雾测试，再由 Inno Setup 7 生成 `installer-output\EVE-Income-Tracker-{version}-x64-Setup.exe`，最后打印绝对路径和 SHA-256。公开构建配置、Bootstrapper、`build`、`dist` 与 `installer-output` 都由 Git 忽略，不会上传远端仓库。
+
 ## 1. 创建虚拟环境
 
 在项目根目录打开 PowerShell：

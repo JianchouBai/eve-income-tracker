@@ -4,7 +4,7 @@ import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
-ROOT = Path(SPECPATH).parent.parent.resolve()
+ROOT = Path(SPECPATH).parent.resolve()
 sys.path.insert(0, str(ROOT))
 
 from scripts.build_support import packaging_manifest

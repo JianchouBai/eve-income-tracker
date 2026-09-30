@@ -11,7 +11,7 @@ from pathlib import Path
 from app.paths import PROJECT_ROOT, ConfigurationError, ReleaseConfig
 from app.version import APP_VERSION
 
-GENERATED_ROOT = PROJECT_ROOT / "build" / "generated"
+GENERATED_ROOT = PROJECT_ROOT / "build" / "windows" / "generated"
 CALLBACK_URL = "http://localhost:8000/auth/callback"
 _CLIENT_ID = re.compile(r"[A-Za-z0-9_-]{20,128}")
 _CONTACT_EMAIL = re.compile(
@@ -192,7 +192,6 @@ def packaging_manifest(
             "webview",
             "webview.platforms.winforms",
             "webview.platforms.edgechromium",
-            "webview.platforms.webview2core",
             "clr",
             "pythonnet",
         ),

@@ -6,6 +6,7 @@ import struct
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from xml.etree import ElementTree
 
 ICON_SIZES = (16, 32, 48, 256)
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -22,10 +23,33 @@ class IconGenerationError(RuntimeError):
 
 def _default_renderer(**options) -> bytes:
     try:
-        from cairosvg import svg2png
-    except ImportError:
+        import resvg_py
+    except (ImportError, OSError):
         raise IconGenerationError("icon_renderer_unavailable") from None
-    rendered = svg2png(**options)
+
+    try:
+        source = options["bytestring"]
+        width = options["output_width"]
+        height = options["output_height"]
+        if (
+            not isinstance(source, bytes)
+            or not isinstance(width, int)
+            or width != height
+            or width not in ICON_SIZES
+            or options.get("unsafe") is not False
+        ):
+            raise ValueError
+        root = ElementTree.fromstring(source)
+        if not root.tag.endswith("}svg") and root.tag != "svg":
+            raise ValueError
+        root.set("width", str(width))
+        root.set("height", str(height))
+        sized_svg = ElementTree.tostring(root, encoding="unicode")
+        rendered = resvg_py.svg_to_bytes(svg_string=sized_svg)
+    except IconGenerationError:
+        raise
+    except Exception:  # noqa: BLE001 - do not expose renderer internals or source.
+        raise IconGenerationError("icon_render_failed") from None
     if not isinstance(rendered, bytes):
         raise IconGenerationError("icon_render_failed")
     return rendered
