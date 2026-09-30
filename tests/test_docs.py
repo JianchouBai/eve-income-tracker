@@ -17,19 +17,19 @@ SMOKE = ROOT / "scripts" / "smoke_app.py"
 
 
 def test_repository_frontend_design_skill_is_complete():
-    skill_path = ROOT / '.codex' / 'skills' / 'frontend-design' / 'SKILL.md'
-    license_path = skill_path.with_name('LICENSE.txt')
+    skill_path = ROOT / ".codex" / "skills" / "frontend-design" / "SKILL.md"
+    license_path = skill_path.with_name("LICENSE.txt")
 
     assert skill_path.is_file()
     assert license_path.is_file()
 
-    skill = skill_path.read_text(encoding='utf-8')
-    license_text = license_path.read_text(encoding='utf-8')
-    assert skill.startswith('---\n')
-    assert 'name: frontend-design' in skill
-    assert 'license: Complete terms in LICENSE.txt' in skill
-    assert 'Apache License' in license_text
-    assert 'Version 2.0' in license_text
+    skill = skill_path.read_text(encoding="utf-8")
+    license_text = license_path.read_text(encoding="utf-8")
+    assert skill.startswith("---\n")
+    assert "name: frontend-design" in skill
+    assert "license: Complete terms in LICENSE.txt" in skill
+    assert "Apache License" in license_text
+    assert "Version 2.0" in license_text
 
 
 def test_example_environment_covers_operational_settings_without_usable_secrets():
@@ -238,3 +238,12 @@ def test_smoke_isolates_credentials_and_inherited_worker_configuration(monkeypat
     monkeypatch.setattr(module["subprocess"], "Popen", inspect_spawn)
     with pytest.raises(RuntimeError, match="synthetic intercepted spawn"):
         module["run_smoke"]()
+
+
+def test_readme_documents_desktop_and_frozen_smoke_commands():
+    readme = read_readme()
+
+    assert "requirements-windows.txt" in readme
+    assert "python.exe -m app.desktop" in readme
+    assert "python.exe -m app.desktop --smoke-test" in readme
+    assert "%LOCALAPPDATA%\\EVE Income Tracker" in readme

@@ -49,6 +49,7 @@ FIRST_RUN_QUESTION = (
     "选择“否”或取消后，将为这台电脑创建新的独立数据库。"
 )
 SMOKE_SUCCESS = "DESKTOP_SMOKE_OK healthz=200 home=200 resources=ok database=ok"
+SMOKE_RESULT_NAME = "desktop-smoke-result.txt"
 
 _ERROR_MESSAGES = {
     "already_running": "EVE 收益追踪器已经运行，请先切换到现有窗口。",
@@ -91,6 +92,15 @@ _ERROR_MESSAGES = {
     "shutdown_failed": "本地服务未能正常停止。请等待片刻后再重新启动应用。",
     "startup_failed": "应用启动失败。请查看本机日志后重试。",
 }
+
+
+def _emit(stream: Any, message: str) -> None:
+    if stream is None:
+        return
+    try:
+        print(message, file=stream)
+    except (AttributeError, OSError):
+        pass
 
 
 class DesktopStartupError(RuntimeError):
@@ -269,6 +279,7 @@ class DesktopApplication:
         logging_active = False
         failure_code: str | None = None
         succeeded = False
+        smoke_result_path: Path | None = None
 
         try:
             guard = dependencies.mutex_factory()
@@ -281,6 +292,8 @@ class DesktopApplication:
                 raise DesktopStartupError("data_unwritable") from None
             dependencies.logging_configurer(paths.logs_dir / DESKTOP_LOG_NAME)
             logging_active = True
+            if self._smoke_test:
+                smoke_result_path = paths.config_dir / SMOKE_RESULT_NAME
 
             if not self._smoke_test and not dependencies.webview_checker():
                 raise DesktopStartupError("webview_missing")
@@ -407,7 +420,7 @@ class DesktopApplication:
                 _ERROR_MESSAGES["startup_failed"],
             )
             if self._smoke_test:
-                print(f"DESKTOP_SMOKE_FAILED code={failure_code}", file=sys.stderr)
+                _emit(sys.stderr, f"DESKTOP_SMOKE_FAILED code={failure_code}")
             else:
                 try:
                     dependencies.error_shower(message)
@@ -417,7 +430,16 @@ class DesktopApplication:
                     )
             return 1
         if self._smoke_test:
-            print(SMOKE_SUCCESS)
+            if smoke_result_path is None:
+                _emit(sys.stderr, "DESKTOP_SMOKE_FAILED code=smoke_contract_failed")
+                return 1
+            try:
+                smoke_result_path.parent.mkdir(parents=True, exist_ok=True)
+                smoke_result_path.write_bytes((SMOKE_SUCCESS + "\n").encode("utf-8"))
+            except OSError:
+                _emit(sys.stderr, "DESKTOP_SMOKE_FAILED code=smoke_contract_failed")
+                return 1
+            _emit(sys.stdout, SMOKE_SUCCESS)
         return 0 if succeeded else 1
 
 
