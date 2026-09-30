@@ -1101,3 +1101,9 @@ tbody tr:hover {
     transition-duration: 0.01ms !important;
   }
 }
+
+[data-desktop-authorization='true'][aria-disabled='true'] {
+  cursor: wait;
+  opacity: 0.62;
+  pointer-events: none;
+}

@@ -62,6 +62,46 @@ function message(text, error = false) {
   element.className = `notice status-bar${error ? ' error' : ''}`;
 }
 
+function waitForAuthorizationPoll() {
+  return new Promise((resolve) => setTimeout(resolve, 1000));
+}
+
+async function startDesktopAuthorization(event) {
+  event.preventDefault();
+  const control = event.currentTarget;
+  if (control.getAttribute('aria-disabled') === 'true') return;
+  control.setAttribute('aria-disabled', 'true');
+  try {
+    const started = await request('/api/authorization-attempts', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrf },
+    });
+    await window.pywebview.api.open_authorization_url(started.authorization_url);
+    for (let poll = 0; poll < 120; poll += 1) {
+      await waitForAuthorizationPoll();
+      const status = await request('/api/authorization-attempts/' + started.attempt_id);
+      if (status.status === 'succeeded') {
+        location.reload();
+        return;
+      }
+      if (status.status === 'failed') {
+        throw new Error(status.message || '授权未完成，请重试。');
+      }
+    }
+    throw new Error('授权等待超时，请重试。');
+  } catch (error) {
+    message('授权未完成，请重试。', true);
+  } finally {
+    control.removeAttribute('aria-disabled');
+  }
+}
+
+function bindDesktopAuthorization() {
+  document.querySelectorAll("[data-desktop-authorization='true']").forEach((control) => {
+    control.addEventListener('click', startDesktopAuthorization);
+  });
+}
+
 function rows(target, items, columns) {
   target.replaceChildren();
   items.forEach((item) => {
@@ -544,6 +584,7 @@ async function sync() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  bindDesktopAuthorization();
   if (document.body.dataset.authenticated !== 'true') return;
   $('date-to').value = beijingDate();
   $('date-from').value = beijingDate(-29);

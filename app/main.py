@@ -14,10 +14,13 @@ from app.storage import (
     JournalRepository,
 )
 from app.sync import SyncService
-from app.web import AppServices, Clock, create_app
+from app.web import AppServices, Clock, RuntimeContext, create_app
 
 
-def build_app(settings: Settings | None = None) -> FastAPI:
+def build_app(
+    settings: Settings | None = None,
+    runtime: RuntimeContext | None = None,
+) -> FastAPI:
     settings = settings or Settings()
     clock = Clock()
     database = Database(
@@ -37,7 +40,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         services.sync = SyncService(
             characters, journal, cipher, sso, EsiClient(settings, http), clock.now_utc
         )
-    application = create_app(settings, services, clock)
+    application = create_app(settings, services, clock, runtime)
     storage_lifespan = application.router.lifespan_context
 
     @asynccontextmanager

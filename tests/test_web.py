@@ -4,13 +4,16 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
 
+from app.auth_attempts import AuthorizationAttemptStore
 from app.config import Settings
+from app.desktop_session import DesktopLaunchTokenStore
 from app.esi import EsiDataError, EsiError
 from app.models import JournalEntry
 from app.security import TokenCipher
@@ -22,7 +25,7 @@ from app.storage import (
     JournalRepository,
 )
 from app.sync import SyncAllResult, SyncResult
-from app.web import AppServices, create_app
+from app.web import AppServices, RuntimeContext, create_app
 
 
 class FakeClock:
@@ -40,17 +43,25 @@ class FakeSso:
             101, "Verified Pilot", ("esi-wallet.read_character_wallet.v1",)
         )
         self.refresh_token = "private-refresh"
+        self.authorization_calls = []
         self.exchange_calls = []
         self.verified_tokens = []
         self.failure = None
 
-    async def build_authorization_url(self, state):
+    async def build_authorization_url(self, state, challenge):
+        self.authorization_calls.append((state, challenge))
         if self.failure == "login":
             raise RuntimeError("private-sso-secret")
-        return "https://login.eveonline.com/v2/oauth/authorize?state=" + state
+        return (
+            "https://login.eveonline.com/v2/oauth/authorize?state="
+            + state
+            + "&code_challenge="
+            + challenge
+            + "&code_challenge_method=S256"
+        )
 
-    async def exchange_code(self, code):
-        self.exchange_calls.append(code)
+    async def exchange_code(self, code, verifier):
+        self.exchange_calls.append((code, verifier))
         if self.failure == "exchange":
             raise SsoError("request_failed", "private-sso-secret")
         return TokenSet(
@@ -151,20 +162,24 @@ def test_invalid_configuration_home_names_only_missing_fields_and_disables_login
         assert rejected.json()["error"]["code"] == "configuration_required"
 
 
-def test_login_redirect_contains_high_entropy_state_in_minimal_session(context):
+def test_login_redirect_contains_pkce_and_minimal_owner_session(context):
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
         response = client.get("/auth/login", follow_redirects=False)
         assert response.status_code == 302
         session = session_data(client, settings.app_session_secret)
-        assert set(session) == {"oauth_state", "csrf_token"}
-        assert len(session["oauth_state"]) >= 43
+        assert set(session) == {"authorization_session_id", "csrf_token"}
+        assert len(session["authorization_session_id"]) >= 43
         assert len(session["csrf_token"]) >= 43
-        assert (
-            response.headers["location"]
-            == "https://login.eveonline.com/v2/oauth/authorize?state="
-            + session["oauth_state"]
-        )
+        state, challenge = services.sso.authorization_calls[-1]
+        query = parse_qs(urlsplit(response.headers["location"]).query)
+        assert query == {
+            "state": [state],
+            "code_challenge": [challenge],
+            "code_challenge_method": ["S256"],
+        }
+        assert len(state) >= 43
+        assert len(challenge) == 43
         cookie = response.headers["set-cookie"].lower()
         assert "httponly" in cookie and "samesite=lax" in cookie
         assert "secure" not in cookie
@@ -206,8 +221,8 @@ def test_main_invalid_config_builds_storage_without_crypto_or_network_services(c
 
 
 def authorize(client, settings, **extra):
-    client.get("/auth/login", follow_redirects=False)
-    state = session_data(client, settings.app_session_secret)["oauth_state"]
+    login = client.get("/auth/login", follow_redirects=False)
+    state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
     return client.get(
         "/auth/callback",
         params={"code": "private-code", "state": state, **extra},
@@ -219,6 +234,171 @@ def csrf_headers(client, settings):
     return {
         "X-CSRF-Token": session_data(client, settings.app_session_secret)["csrf_token"]
     }
+
+
+def desktop_runtime(clock):
+    return RuntimeContext(
+        mode="desktop",
+        attempts=AuthorizationAttemptStore(clock=clock.now_utc),
+        launch_tokens=DesktopLaunchTokenStore(clock=clock.now_utc),
+    )
+
+
+def launch_desktop(client, settings, runtime):
+    token = runtime.launch_tokens.issue()
+    response = client.get(
+        "/",
+        params={"launch_token": token},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
+    return token, session_data(client, settings.app_session_secret)
+
+
+def test_desktop_launch_token_establishes_session_redirects_clean_and_rejects_replay(
+    context,
+):
+    settings, services, clock = context
+    settings.runtime_mode = "desktop"
+    runtime = desktop_runtime(clock)
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        token, session = launch_desktop(client, settings, runtime)
+        assert set(session) == {
+            "viewer_authenticated",
+            "desktop_session_id",
+            "csrf_token",
+        }
+        assert session["viewer_authenticated"] is True
+        assert len(session["desktop_session_id"]) >= 43
+        assert len(session["csrf_token"]) >= 43
+        clean = client.get("/")
+        assert clean.status_code == 200
+        assert "launch_token" not in clean.text
+        assert "data-runtime-mode='desktop'" in clean.text
+
+        replay = client.get(
+            "/",
+            params={"launch_token": token},
+            follow_redirects=False,
+        )
+        assert replay.status_code == 401
+        assert token not in replay.text
+
+
+def test_development_mode_rejects_launch_tokens_and_still_uses_browser_login(
+    context,
+):
+    settings, services, clock = context
+    runtime = RuntimeContext(
+        mode="development",
+        attempts=AuthorizationAttemptStore(clock=clock.now_utc),
+        launch_tokens=DesktopLaunchTokenStore(clock=clock.now_utc),
+    )
+    token = runtime.launch_tokens.issue()
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        response = client.get("/", params={"launch_token": token})
+        assert response.status_code == 401
+        home = client.get("/")
+        assert "/auth/login" in home.text
+        assert home.headers["content-type"].startswith("text/html")
+
+
+def test_desktop_authorization_api_requires_csrf_and_returns_no_verifier(context):
+    settings, services, clock = context
+    settings.runtime_mode = "desktop"
+    runtime = desktop_runtime(clock)
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        for headers in ({}, {"X-CSRF-Token": "wrong"}):
+            rejected = client.post("/api/authorization-attempts", headers=headers)
+            assert rejected.status_code == 403
+
+        response = client.post(
+            "/api/authorization-attempts",
+            headers=csrf_headers(client, settings),
+        )
+        assert response.status_code == 201
+        payload = response.json()
+        assert set(payload) == {"attempt_id", "authorization_url"}
+        assert "private-" not in response.text
+        assert "code_challenge_method=S256" in payload["authorization_url"]
+        assert services.sso.authorization_calls
+        pending = client.get(f"/api/authorization-attempts/{payload['attempt_id']}")
+        assert pending.json() == {"status": "pending", "message": None}
+
+
+def test_desktop_system_browser_callback_saves_syncs_and_owner_poll_consumes(
+    context,
+):
+    settings, services, clock = context
+    settings.runtime_mode = "desktop"
+    runtime = desktop_runtime(clock)
+    app = create_app(settings, services, clock, runtime)
+    with TestClient(app) as desktop:
+        launch_desktop(desktop, settings, runtime)
+        started = desktop.post(
+            "/api/authorization-attempts",
+            headers=csrf_headers(desktop, settings),
+        ).json()
+        state = parse_qs(urlsplit(started["authorization_url"]).query)["state"][0]
+
+        with TestClient(app) as system_browser:
+            callback = system_browser.get(
+                "/auth/callback",
+                params={"code": "private-code", "state": state},
+            )
+        assert callback.status_code == 200
+        assert callback.headers["content-type"].startswith("text/html")
+        assert "可以关闭此页面" in callback.text
+        assert "private-" not in callback.text
+
+        status = desktop.get(f"/api/authorization-attempts/{started['attempt_id']}")
+        assert status.json() == {"status": "succeeded", "message": None}
+        consumed = desktop.get(f"/api/authorization-attempts/{started['attempt_id']}")
+        assert consumed.status_code == 404
+
+    (record,) = services.characters.list_all()
+    assert record.character_id == 101
+    assert services.sync.calls == [(101, "private-access")]
+    assert [call[0] for call in services.sso.exchange_calls] == ["private-code"]
+
+
+def test_desktop_callback_rejects_present_different_session_without_claiming(
+    context,
+):
+    settings, services, clock = context
+    settings.runtime_mode = "desktop"
+    runtime = desktop_runtime(clock)
+    app = create_app(settings, services, clock, runtime)
+    with TestClient(app) as owner, TestClient(app) as other:
+        launch_desktop(owner, settings, runtime)
+        started = owner.post(
+            "/api/authorization-attempts",
+            headers=csrf_headers(owner, settings),
+        ).json()
+        state = parse_qs(urlsplit(started["authorization_url"]).query)["state"][0]
+        launch_desktop(other, settings, runtime)
+
+        rejected = other.get(
+            "/auth/callback",
+            params={"code": "private-code", "state": state},
+        )
+        assert rejected.status_code == 400
+        assert services.sso.exchange_calls == []
+        assert (
+            owner.get(f"/api/authorization-attempts/{started['attempt_id']}").json()[
+                "status"
+            ]
+            == "pending"
+        )
+
+        other.cookies.clear()
+        accepted = other.get(
+            "/auth/callback",
+            params={"code": "private-code", "state": state},
+        )
+        assert accepted.status_code == 200
 
 
 @pytest.mark.parametrize("state", [None, "", "wrong", "非匹配状态"])
@@ -291,9 +471,9 @@ def test_adding_character_and_reauthorizing_preserves_original_tracking_start(co
 def test_callback_state_cannot_be_replayed_even_with_original_signed_cookie(context):
     settings, services, clock = context
     with TestClient(create_app(settings, services, clock)) as client:
-        client.get("/auth/login", follow_redirects=False)
+        login = client.get("/auth/login", follow_redirects=False)
         cookie = client.cookies.get("session")
-        state = session_data(client, settings.app_session_secret)["oauth_state"]
+        state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
         params = {"code": "private-code", "state": state}
         assert (
             client.get(
@@ -305,7 +485,7 @@ def test_callback_state_cannot_be_replayed_even_with_original_signed_cookie(cont
         client.cookies.set("session", cookie)
         replay = client.get("/auth/callback", params=params, follow_redirects=False)
         assert replay.status_code == 400
-        assert services.sso.exchange_calls == ["private-code"]
+        assert [call[0] for call in services.sso.exchange_calls] == ["private-code"]
 
 
 @pytest.mark.parametrize("failure", ["exchange", "verify"])

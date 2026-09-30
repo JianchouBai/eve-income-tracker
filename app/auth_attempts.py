@@ -147,6 +147,11 @@ class AuthorizationAttemptStore:
         self._remove(attempt)
         return status
 
+    def discard(self, attempt_id: str) -> None:
+        attempt = self._by_id.get(attempt_id)
+        if attempt is not None:
+            self._remove(attempt)
+
     def cleanup(self) -> int:
         now = self._clock()
         expired = [

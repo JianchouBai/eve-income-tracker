@@ -7,17 +7,20 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, field_validator
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.auth_attempts import AuthorizationAttemptError, AuthorizationAttemptStore
 from app.config import Settings
+from app.desktop_session import DesktopLaunchTokenStore, DesktopSessionError
 from app.esi import EsiError
 from app.models import CharacterGroupRecord, CharacterRecord
 from app.reporting import BEIJING, build_dashboard, classify_entry, parse_date_range
@@ -127,6 +130,13 @@ class AppServices:
     sync: SyncService | None
 
 
+@dataclass
+class RuntimeContext:
+    mode: Literal["development", "desktop"]
+    attempts: AuthorizationAttemptStore
+    launch_tokens: DesktopLaunchTokenStore
+
+
 class Clock:
     def now_utc(self) -> datetime:
         return datetime.now(UTC)
@@ -224,9 +234,20 @@ def _sync_error(code: str | None) -> dict:
     return {"code": code, "message": SYNC_MESSAGES[code]}
 
 
-def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastAPI:
+def create_app(
+    settings: Settings,
+    services: AppServices,
+    clock: Clock,
+    runtime: RuntimeContext | None = None,
+) -> FastAPI:
     issues = settings.configuration_issues()
-    pending_states: set[str] = set()
+    runtime = runtime or RuntimeContext(
+        mode=settings.runtime_mode,
+        attempts=AuthorizationAttemptStore(clock=clock.now_utc),
+        launch_tokens=DesktopLaunchTokenStore(clock=clock.now_utc),
+    )
+    if runtime.mode != settings.runtime_mode:
+        raise ValueError("runtime mode must match settings")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -235,6 +256,7 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
 
     app = FastAPI(lifespan=lifespan)
     app.state.services = services
+    app.state.runtime = runtime
     try:
         callback = urlsplit(settings.eve_callback_url)
         local_http = callback.scheme == "http" and callback.hostname in {
@@ -280,6 +302,23 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
 
     @app.get("/")
     async def home(request: Request):
+        launch_tokens = request.query_params.getlist("launch_token")
+        if launch_tokens:
+            if runtime.mode != "desktop" or len(launch_tokens) != 1:
+                raise WebError(401, "invalid_launch", "桌面启动凭据无效或已使用。")
+            try:
+                desktop_session_id = runtime.launch_tokens.consume(launch_tokens[0])
+            except DesktopSessionError:
+                raise WebError(
+                    401,
+                    "invalid_launch",
+                    "桌面启动凭据无效或已使用。",
+                ) from None
+            request.session.clear()
+            request.session["viewer_authenticated"] = True
+            request.session["desktop_session_id"] = desktop_session_id
+            request.session["csrf_token"] = secrets.token_urlsafe(32)
+            return RedirectResponse("/", status_code=302)
         return templates.TemplateResponse(
             request=request,
             name="index.html",
@@ -287,79 +326,208 @@ def create_app(settings: Settings, services: AppServices, clock: Clock) -> FastA
                 "configuration_issues": issues,
                 "authenticated": request.session.get("viewer_authenticated", False),
                 "csrf_token": request.session.get("csrf_token", ""),
+                "runtime_mode": runtime.mode,
             },
         )
 
     @app.get("/auth/login")
     async def login(request: Request):
+        if runtime.mode != "development":
+            raise WebError(404, "not_found", "页面不存在。")
         if issues or services.sso is None:
             raise WebError(503, "configuration_required", "请先完成应用配置。")
-        state = secrets.token_urlsafe(32)
-        pending_states.discard(request.session.get("oauth_state"))
-        pending_states.add(state)
-        request.session["oauth_state"] = state
+        owner_session_id = secrets.token_urlsafe(32)
+        attempt = runtime.attempts.start(owner_session_id)
+        request.session.clear()
+        request.session["authorization_session_id"] = owner_session_id
         request.session["csrf_token"] = secrets.token_urlsafe(32)
         try:
-            url = await services.sso.build_authorization_url(state)
+            url = await services.sso.build_authorization_url(
+                attempt.state,
+                attempt.challenge,
+            )
         except Exception:  # noqa: BLE001 - never expose provider text or credentials.
-            pending_states.discard(state)
-            request.session.pop("oauth_state", None)
+            runtime.attempts.discard(attempt.attempt_id)
+            request.session.pop("authorization_session_id", None)
             raise WebError(
                 502, "authorization_failed", "无法开始 EVE 授权，请稍后重试。"
             ) from None
         return RedirectResponse(url, status_code=302)
 
+    @app.post("/api/authorization-attempts")
+    async def start_desktop_authorization(request: Request):
+        if runtime.mode != "desktop":
+            raise WebError(404, "not_found", "页面不存在。")
+        _require_csrf(request)
+        if issues or services.sso is None:
+            raise WebError(503, "configuration_required", "请先完成应用配置。")
+        owner_session_id = request.session.get("desktop_session_id")
+        if not isinstance(owner_session_id, str):
+            raise WebError(401, "authentication_required", "桌面会话无效，请重启应用。")
+        attempt = runtime.attempts.start(owner_session_id)
+        try:
+            authorization_url = await services.sso.build_authorization_url(
+                attempt.state,
+                attempt.challenge,
+            )
+        except Exception:  # noqa: BLE001 - never expose provider text or credentials.
+            runtime.attempts.discard(attempt.attempt_id)
+            raise WebError(
+                502, "authorization_failed", "无法开始 EVE 授权，请稍后重试。"
+            ) from None
+        return JSONResponse(
+            {
+                "attempt_id": attempt.attempt_id,
+                "authorization_url": authorization_url,
+            },
+            status_code=201,
+        )
+
+    @app.get("/api/authorization-attempts/{attempt_id}")
+    async def desktop_authorization_status(attempt_id: str, request: Request):
+        if runtime.mode != "desktop":
+            raise WebError(404, "not_found", "页面不存在。")
+        _require_viewer(request)
+        owner_session_id = request.session.get("desktop_session_id")
+        if not isinstance(owner_session_id, str):
+            raise WebError(401, "authentication_required", "桌面会话无效，请重启应用。")
+        try:
+            status = runtime.attempts.consume_status(attempt_id, owner_session_id)
+        except AuthorizationAttemptError as error:
+            if error.code == "attempt_owner_mismatch":
+                raise WebError(403, "forbidden", "无权查看此授权状态。") from None
+            raise WebError(
+                404, "attempt_not_found", "授权请求不存在或已过期。"
+            ) from None
+        message = "授权未完成，请重试。" if status.status == "failed" else None
+        return {"status": status.status, "message": message}
+
+    def desktop_callback_page(succeeded: bool) -> HTMLResponse:
+        if succeeded:
+            title = "EVE 授权已完成"
+            detail = "授权已安全完成，可以关闭此页面并返回应用。"
+        else:
+            title = "EVE 授权未完成"
+            detail = "授权未完成，请关闭此页面并返回应用重试。"
+        document = (
+            "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>"
+            + title
+            + "</title></head><body><main><h1>"
+            + title
+            + "</h1><p>"
+            + detail
+            + "</p></main></body></html>"
+        )
+        return HTMLResponse(
+            document,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": "default-src 'none'; base-uri 'none'; form-action 'none'",
+            },
+        )
+
     @app.get("/auth/callback")
     async def callback(request: Request):
-        expected = request.session.pop("oauth_state", None)
-        known = expected in pending_states
-        pending_states.discard(expected)
-        if not _matches(request.query_params.get("state"), expected) or not known:
+        state_values = request.query_params.getlist("state")
+        state = state_values[0] if len(state_values) == 1 else ""
+        callback_session_id = (
+            request.session.get("desktop_session_id")
+            if runtime.mode == "desktop"
+            else request.session.get("authorization_session_id")
+        )
+        if runtime.mode == "development" and not isinstance(callback_session_id, str):
             raise WebError(400, "invalid_state", "登录状态无效或已使用，请重新登录。")
-        if issues or services.sso is None or services.cipher is None:
-            raise WebError(503, "configuration_required", "请先完成应用配置。")
-        code = request.query_params.get("code")
-        if not code or request.query_params.get("error"):
-            raise WebError(400, "authorization_failed", "EVE 授权未完成，请重试。")
         try:
-            tokens = await services.sso.exchange_code(code)
+            claimed = runtime.attempts.claim_callback(state or "", callback_session_id)
+        except AuthorizationAttemptError:
+            raise WebError(
+                400, "invalid_state", "登录状态无效或已使用，请重新登录。"
+            ) from None
+        if runtime.mode == "development":
+            request.session.pop("authorization_session_id", None)
+
+        def callback_failure(error_code: str, status: int, message: str):
+            runtime.attempts.fail(claimed.attempt_id, error_code)
+            if runtime.mode == "desktop":
+                return desktop_callback_page(False)
+            raise WebError(status, "authorization_failed", message)
+
+        if issues or services.sso is None or services.cipher is None:
+            return callback_failure(
+                "configuration_required",
+                503,
+                "请先完成应用配置。",
+            )
+        code_values = request.query_params.getlist("code")
+        error_values = request.query_params.getlist("error")
+        code = code_values[0] if len(code_values) == 1 else ""
+        if not code or error_values:
+            return callback_failure(
+                "authorization_denied",
+                400,
+                "EVE 授权未完成，请重试。",
+            )
+        try:
+            tokens = await services.sso.exchange_code(code, claimed.verifier)
         except Exception as error:  # noqa: BLE001 - log only safe diagnostics.
             _log_authorization_failure("token_exchange", error)
-            raise WebError(
-                502, "authorization_failed", "EVE 授权验证失败，请重试。"
-            ) from None
+            return callback_failure(
+                "token_exchange_failed",
+                502,
+                "EVE 授权验证失败，请重试。",
+            )
         try:
             identity = await services.sso.verify_access_token(tokens.access_token)
         except Exception as error:  # noqa: BLE001 - log only safe diagnostics.
             _log_authorization_failure("token_verification", error)
-            raise WebError(
-                502, "authorization_failed", "EVE 授权验证失败，请重试。"
-            ) from None
-        authorized_at = clock.now_utc()
-        services.characters.upsert_authorization(
-            identity.character_id,
-            identity.character_name,
-            services.cipher.encrypt(tokens.refresh_token),
-            authorized_at,
-        )
-        request.session["viewer_authenticated"] = True
-        request.session["csrf_token"] = secrets.token_urlsafe(32)
+            return callback_failure(
+                "token_verification_failed",
+                502,
+                "EVE 授权验证失败，请重试。",
+            )
+        try:
+            authorized_at = clock.now_utc()
+            services.characters.upsert_authorization(
+                identity.character_id,
+                identity.character_name,
+                services.cipher.encrypt(tokens.refresh_token),
+                authorized_at,
+            )
+        except Exception:  # noqa: BLE001 - expose only a fixed save failure.
+            logger.warning(
+                "EVE authorization failed: stage=credential_save code=unexpected_error"
+            )
+            return callback_failure(
+                "credential_save_failed",
+                500,
+                "无法保存 EVE 授权，请重试。",
+            )
+
         target = "/"
         if services.sync is not None:
             try:
                 result = await services.sync.sync_character(
-                    identity.character_id, initial_access_token=tokens.access_token
+                    identity.character_id,
+                    initial_access_token=tokens.access_token,
                 )
                 if result.status != "ok":
                     target = "/?status=sync_failed"
             except Exception:  # noqa: BLE001 - authorization remains saved on sync failure.
                 target = "/?status=sync_failed"
+
+        runtime.attempts.succeed(claimed.attempt_id)
+        if runtime.mode == "desktop":
+            return desktop_callback_page(True)
+        request.session.clear()
+        request.session["viewer_authenticated"] = True
+        request.session["csrf_token"] = secrets.token_urlsafe(32)
         return RedirectResponse(target, status_code=302)
 
     @app.post("/auth/logout")
     async def logout(request: Request):
         _require_csrf(request)
-        pending_states.discard(request.session.get("oauth_state"))
         request.session.clear()
         return RedirectResponse("/", status_code=302)
 

@@ -1,5 +1,6 @@
 import re
 
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -22,7 +23,14 @@ def client(tmp_path):
         None,
         None,
     )
-    settings = Settings(_env_file=None)
+    settings = Settings(
+        _env_file=None,
+        eve_client_id="public-client-id",
+        app_session_secret="frontend-session-secret-" * 3,
+        app_encryption_key=Fernet.generate_key().decode(),
+        database_path=tmp_path / "income.sqlite3",
+        eve_user_agent="eve-income-tracker/0.1 (admin@example.com)",
+    )
     return TestClient(create_app(settings, services, Clock()))
 
 
@@ -251,3 +259,25 @@ def test_dashboard_script_keeps_maximum_chart_ratio_and_role_controls_separate(
     assert "label.append(reportSelect, text);" in script
     assert "row.append(label, status, toggle);" in script
     assert "label.append(reportSelect, text, status, toggle);" not in script
+
+
+def test_desktop_authorization_script_uses_only_allowlisted_bridge_and_bounded_poll(
+    tmp_path,
+):
+    with client(tmp_path) as browser:
+        script = browser.get("/static/app.js").text
+        page = browser.get("/").text
+
+    for token in [
+        "/api/authorization-attempts",
+        "window.pywebview.api.open_authorization_url",
+        "X-CSRF-Token",
+        "authorization_url",
+        "attempt_id",
+        "location.reload()",
+        "授权未完成，请重试。",
+    ]:
+        assert token in script
+    assert "for (let poll = 0; poll < 120; poll += 1)" in script
+    assert "window.open(" not in script
+    assert "href='/auth/login'" in page
