@@ -53,6 +53,18 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
 
+    def inspect_version(self) -> int:
+        uri = self.path.resolve().as_uri() + "?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=0)
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            integrity = connection.execute("PRAGMA quick_check").fetchone()
+            if integrity is None or integrity[0] != "ok":
+                raise sqlite3.DatabaseError("database integrity check failed")
+            return int(connection.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            connection.close()
+
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
