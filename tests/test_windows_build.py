@@ -121,8 +121,11 @@ def test_build_pipeline_has_fail_fast_release_gates_and_scoped_cleanup():
     assert "Remove-Item $" not in script
     assert "Invoke-Expression" not in script
     assert "Start-Process" not in script
-    assert "$emptyTree = (& git hash-object -t tree NUL).Trim()" in script
-    assert '@("diff", "--check", $emptyTree, "HEAD")' in script
+    assert "$headCommit = (& git rev-parse HEAD).Trim()" in script
+    assert "$releaseBase = (& git merge-base origin/main HEAD).Trim()" in script
+    assert '$releaseBase = (& git rev-parse "HEAD^").Trim()' in script
+    assert '@("diff", "--check", $releaseBase, "HEAD")' in script
+    assert "hash-object -t tree NUL" not in script
     assert '@("diff", "--check")' not in script
 
 
