@@ -7,7 +7,7 @@
   <title>EVE 每日收益</title>
   <link rel='stylesheet' href='/static/app.css'>
 </head>
-<body data-authenticated='{{ authenticated|lower }}'>
+<body data-authenticated='{{ authenticated|lower }}' data-runtime-mode='{{ runtime_mode }}'>
   <main class='shell' aria-labelledby='page-title'>
     <header class='masthead'>
       <div class='brand-lockup'>
@@ -27,7 +27,7 @@
         {% if configuration_issues %}
         <span id='add-role-link' class='button button-disabled'>完成配置后可登录</span>
         {% else %}
-        <a id='add-role-link' class='button button-primary' href='/auth/login'>{{ '添加角色' if authenticated else '登录 EVE' }}</a>
+        <a id='add-role-link' class='button button-primary' href='{{ "#" if runtime_mode == "desktop" else "/auth/login" }}'{% if runtime_mode == "desktop" %} data-desktop-authorization='true'{% endif %}>{{ '添加角色' if authenticated else '登录 EVE' }}</a>
         {% endif %}
       </div>
     </header>
@@ -100,7 +100,7 @@
               <button id='report-button' class='button button-secondary' type='submit'>更新报表</button>
               <button id='sync-button' class='button button-primary' type='button'>同步钱包流水</button>
             </div>
-            <a id='reauthorize-link' class='rail-link' href='{{ '/auth/login' if not configuration_issues else '#' }}'>重新授权或添加角色</a>
+            <a id='reauthorize-link' class='rail-link' href='{{ "#" if configuration_issues or runtime_mode == "desktop" else "/auth/login" }}'{% if runtime_mode == "desktop" and not configuration_issues %} data-desktop-authorization='true'{% endif %}>重新授权或添加角色</a>
           </form>
 
           <section id='sync-results' class='sync-panel' aria-live='polite'>

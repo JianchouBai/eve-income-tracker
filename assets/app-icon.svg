@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="space" x1="24" y1="20" x2="226" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#152936"/>
+      <stop offset="1" stop-color="#071016"/>
+    </linearGradient>
+    <linearGradient id="ice" x1="54" y1="64" x2="204" y2="196" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#dff8f6"/>
+      <stop offset="0.46" stop-color="#72d6cf"/>
+      <stop offset="1" stop-color="#2b7f84"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="50" fill="url(#space)"/>
+  <circle cx="128" cy="128" r="70" fill="none" stroke="#294c5a" stroke-width="3"/>
+  <ellipse cx="128" cy="128" rx="91" ry="39" fill="none" stroke="url(#ice)" stroke-width="9" transform="rotate(-28 128 128)"/>
+  <ellipse cx="128" cy="128" rx="91" ry="39" fill="none" stroke="#dff8f6" stroke-opacity=".42" stroke-width="2" transform="rotate(28 128 128)"/>
+  <circle cx="128" cy="128" r="28" fill="#0b1820" stroke="url(#ice)" stroke-width="9"/>
+  <circle cx="201" cy="75" r="13" fill="#e9a95f" stroke="#fff0cc" stroke-width="4"/>
+  <path d="M104 128h48M128 104v48" stroke="#dff8f6" stroke-width="7" stroke-linecap="round"/>
+</svg>

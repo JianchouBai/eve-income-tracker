@@ -527,3 +527,19 @@ def test_failed_batch_rolls_back_rows_and_last_synced_at(tmp_path):
         == []
     )
     assert characters.list_all()[0].last_synced_at is None
+
+
+def test_inspect_version_is_read_only_and_rejects_corrupt_database(tmp_path):
+    path = tmp_path / "income.sqlite3"
+    create_version_one_database(path)
+    original = path.read_bytes()
+
+    assert Database(path).inspect_version() == 1
+    assert path.read_bytes() == original
+
+    corrupt = tmp_path / "corrupt.sqlite3"
+    corrupt.write_bytes(b"not-a-sqlite-database")
+    corrupt_bytes = corrupt.read_bytes()
+    with pytest.raises(sqlite3.DatabaseError):
+        Database(corrupt).inspect_version()
+    assert corrupt.read_bytes() == corrupt_bytes

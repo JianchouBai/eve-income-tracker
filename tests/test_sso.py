@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import traceback
@@ -12,7 +13,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from app.config import Settings
-from app.sso import SsoClient, SsoError
+from app.sso import PkcePair, SsoClient, SsoError
 
 DISCOVERY = "https://login.eveonline.com/.well-known/oauth-authorization-server"
 WALLET_SCOPE = "esi-wallet.read_character_wallet.v1"
@@ -24,15 +25,17 @@ METADATA = {
     "response_types_supported": ["code"],
     "subject_types_supported": ["public"],
     "id_token_signing_alg_values_supported": ["RS256"],
-    "token_endpoint_auth_methods_supported": ["client_secret_basic"],
+    "token_endpoint_auth_methods_supported": ["none"],
     "code_challenge_methods_supported": ["S256"],
     "revocation_endpoint": "https://login.eveonline.com/v2/oauth/revoke",
-    "revocation_endpoint_auth_methods_supported": ["client_secret_basic"],
+    "revocation_endpoint_auth_methods_supported": ["none"],
 }
 SECRET = "client-secret-never-print"
 CODE = "authorization-code-never-print"
 ACCESS = "access-token-never-print"
 REFRESH = "refresh-token-never-print"
+VERIFIER = "v" * 43
+CHALLENGE = "c" * 43
 TOKEN_RESPONSE = {
     "access_token": ACCESS,
     "token_type": "Bearer",
@@ -45,7 +48,6 @@ def settings():
     return Settings(
         _env_file=None,
         eve_client_id="client-id",
-        eve_client_secret=SECRET,
         eve_callback_url="http://localhost:8000/auth/callback",
     )
 
@@ -58,7 +60,27 @@ class Clock:
         return self.now
 
 
-def test_authorization_url_and_metadata_cache_expire_at_one_hour():
+def test_pkce_pair_uses_32_random_bytes_and_unpadded_s256():
+    first = PkcePair.generate()
+    second = PkcePair.generate()
+
+    decoded = base64.urlsafe_b64decode(first.verifier + "=")
+    expected_challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(first.verifier.encode()).digest())
+        .decode()
+        .rstrip("=")
+    )
+    assert len(decoded) == 32
+    assert len(first.verifier) == 43
+    assert "=" not in first.verifier
+    assert first.challenge == expected_challenge
+    assert len(first.challenge) == 43
+    assert "=" not in first.challenge
+    assert first != second
+    assert first.verifier not in repr(first)
+
+
+def test_authorization_url_uses_pkce_and_metadata_cache_expires_at_one_hour():
     async def scenario():
         requests = []
         clock = Clock()
@@ -71,7 +93,9 @@ def test_authorization_url_and_metadata_cache_expire_at_one_hour():
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
             sso = SsoClient(settings(), http, clock)
-            parsed = urlsplit(await sso.build_authorization_url("state +/&?"))
+            parsed = urlsplit(
+                await sso.build_authorization_url("state +/&?", CHALLENGE)
+            )
             assert (parsed.scheme, parsed.netloc, parsed.path) == (
                 "https",
                 "login.eveonline.com",
@@ -83,19 +107,21 @@ def test_authorization_url_and_metadata_cache_expire_at_one_hour():
                 "redirect_uri": ["http://localhost:8000/auth/callback"],
                 "scope": [WALLET_SCOPE],
                 "state": ["state +/&?"],
+                "code_challenge": [CHALLENGE],
+                "code_challenge_method": ["S256"],
             }
             clock.now += timedelta(seconds=3599)
-            await sso.build_authorization_url("second")
+            await sso.build_authorization_url("second", CHALLENGE)
             assert len(requests) == 1
             clock.now += timedelta(seconds=1)
-            await sso.build_authorization_url("third")
+            await sso.build_authorization_url("third", CHALLENGE)
             assert len(requests) == 2
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("operation", ["exchange", "refresh"])
-def test_token_request_uses_form_and_basic_auth(operation):
+def test_token_request_uses_public_client_form_without_authorization(operation):
     async def scenario():
         token_requests = []
 
@@ -108,19 +134,23 @@ def test_token_request_uses_form_and_basic_auth(operation):
             assert (
                 request.headers["content-type"] == "application/x-www-form-urlencoded"
             )
-            auth = base64.b64decode(
-                request.headers["authorization"].split()[1]
-            ).decode()
-            assert auth == "client-id:" + SECRET
+            assert "authorization" not in request.headers
+            assert SECRET not in request.content.decode()
             assert all(v is not None for v in request.extensions["timeout"].values())
             expected = (
                 {
                     "grant_type": ["authorization_code"],
                     "code": [CODE],
                     "redirect_uri": ["http://localhost:8000/auth/callback"],
+                    "code_verifier": [VERIFIER],
+                    "client_id": ["client-id"],
                 }
                 if operation == "exchange"
-                else {"grant_type": ["refresh_token"], "refresh_token": [REFRESH]}
+                else {
+                    "grant_type": ["refresh_token"],
+                    "refresh_token": [REFRESH],
+                    "client_id": ["client-id"],
+                }
             )
             assert parse_qs(request.content.decode()) == expected
             return httpx.Response(200, json=TOKEN_RESPONSE)
@@ -128,7 +158,7 @@ def test_token_request_uses_form_and_basic_auth(operation):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
             sso = SsoClient(settings(), http, Clock())
             tokens = (
-                await sso.exchange_code(CODE)
+                await sso.exchange_code(CODE, VERIFIER)
                 if operation == "exchange"
                 else await sso.refresh(REFRESH)
             )
@@ -142,11 +172,48 @@ def test_token_request_uses_form_and_basic_auth(operation):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("operation", "expected_code"),
+    [
+        ("empty_state", "invalid_request"),
+        ("bad_challenge", "invalid_pkce"),
+        ("empty_code", "invalid_request"),
+        ("bad_verifier", "invalid_pkce"),
+        ("empty_refresh", "invalid_request"),
+    ],
+)
+def test_malformed_public_client_inputs_fail_before_network(operation, expected_code):
+    async def scenario():
+        requests = []
+
+        def handle(request):
+            requests.append(request)
+            raise AssertionError("network must not be called")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            sso = SsoClient(settings(), http, Clock())
+            with pytest.raises(SsoError) as caught:
+                if operation == "empty_state":
+                    await sso.build_authorization_url("", CHALLENGE)
+                elif operation == "bad_challenge":
+                    await sso.build_authorization_url("state", "bad=")
+                elif operation == "empty_code":
+                    await sso.exchange_code("", VERIFIER)
+                elif operation == "bad_verifier":
+                    await sso.exchange_code(CODE, "short")
+                else:
+                    await sso.refresh("")
+            assert caught.value.code == expected_code
+            assert requests == []
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("failure", ["http", "redirect", "network", "json", "shape"])
 @pytest.mark.parametrize("operation", ["exchange", "refresh"])
 def test_token_failures_do_not_leak_secrets(failure, operation, caplog):
     async def scenario():
-        sensitive = f"{SECRET} {CODE} {ACCESS} {REFRESH}"
+        sensitive = f"{SECRET} {CODE} {ACCESS} {REFRESH} {VERIFIER}"
 
         def handle(request):
             if str(request.url) == DISCOVERY:
@@ -171,13 +238,13 @@ def test_token_failures_do_not_leak_secrets(failure, operation, caplog):
             sso = SsoClient(settings(), http, Clock())
             with pytest.raises(SsoError) as caught:
                 if operation == "exchange":
-                    await sso.exchange_code(CODE)
+                    await sso.exchange_code(CODE, VERIFIER)
                 else:
                     await sso.refresh(REFRESH)
             assert caught.value.code
             assert caught.value.user_message
             rendered = "".join(traceback.format_exception(caught.value))
-            for secret in [SECRET, CODE, ACCESS, REFRESH]:
+            for secret in [SECRET, CODE, ACCESS, REFRESH, VERIFIER]:
                 assert secret not in str(caught.value)
                 assert secret not in rendered
                 assert secret not in caplog.text
@@ -233,7 +300,7 @@ def test_untrusted_discovery_endpoints_are_rejected_before_use(field, endpoint):
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
             with pytest.raises(SsoError):
-                await SsoClient(settings(), http, Clock()).exchange_code(CODE)
+                await SsoClient(settings(), http, Clock()).exchange_code(CODE, VERIFIER)
 
     asyncio.run(scenario())
 

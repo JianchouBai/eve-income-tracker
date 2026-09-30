@@ -17,19 +17,19 @@ SMOKE = ROOT / "scripts" / "smoke_app.py"
 
 
 def test_repository_frontend_design_skill_is_complete():
-    skill_path = ROOT / '.codex' / 'skills' / 'frontend-design' / 'SKILL.md'
-    license_path = skill_path.with_name('LICENSE.txt')
+    skill_path = ROOT / ".codex" / "skills" / "frontend-design" / "SKILL.md"
+    license_path = skill_path.with_name("LICENSE.txt")
 
     assert skill_path.is_file()
     assert license_path.is_file()
 
-    skill = skill_path.read_text(encoding='utf-8')
-    license_text = license_path.read_text(encoding='utf-8')
-    assert skill.startswith('---\n')
-    assert 'name: frontend-design' in skill
-    assert 'license: Complete terms in LICENSE.txt' in skill
-    assert 'Apache License' in license_text
-    assert 'Version 2.0' in license_text
+    skill = skill_path.read_text(encoding="utf-8")
+    license_text = license_path.read_text(encoding="utf-8")
+    assert skill.startswith("---\n")
+    assert "name: frontend-design" in skill
+    assert "license: Complete terms in LICENSE.txt" in skill
+    assert "Apache License" in license_text
+    assert "Version 2.0" in license_text
 
 
 def test_example_environment_covers_operational_settings_without_usable_secrets():
@@ -38,7 +38,6 @@ def test_example_environment_covers_operational_settings_without_usable_secrets(
     values = dotenv_values(example)
     assert set(values) == {
         "EVE_CLIENT_ID",
-        "EVE_CLIENT_SECRET",
         "EVE_CALLBACK_URL",
         "APP_SESSION_SECRET",
         "APP_ENCRYPTION_KEY",
@@ -51,7 +50,6 @@ def test_example_environment_covers_operational_settings_without_usable_secrets(
     assert values["DATABASE_PATH"] == "data/eve_income.sqlite3"
     for name in [
         "EVE_CLIENT_ID",
-        "EVE_CLIENT_SECRET",
         "APP_SESSION_SECRET",
         "APP_ENCRYPTION_KEY",
     ]:
@@ -240,3 +238,82 @@ def test_smoke_isolates_credentials_and_inherited_worker_configuration(monkeypat
     monkeypatch.setattr(module["subprocess"], "Popen", inspect_spawn)
     with pytest.raises(RuntimeError, match="synthetic intercepted spawn"):
         module["run_smoke"]()
+
+
+def test_readme_documents_desktop_and_frozen_smoke_commands():
+    readme = read_readme()
+
+    assert "requirements-windows.txt" in readme
+    assert "python.exe -m app.desktop" in readme
+    assert "python.exe -m app.desktop --smoke-test" in readme
+    assert "%LOCALAPPDATA%\\EVE Income Tracker" in readme
+
+
+def test_readme_leads_with_installed_windows_operation_contract():
+    readme = read_readme()
+
+    installed_section = readme.split("## 开发与维护", 1)[0]
+    for statement in [
+        "无需安装 Python",
+        "无需打开终端",
+        "系统默认浏览器",
+        "PKCE",
+        "每台电脑使用独立数据库",
+        r"%LOCALAPPDATA%\EVE Income Tracker",
+        "不使用 Client Secret",
+        "旧版 v2",
+        "重新授权",
+        "升级不会删除",
+        "默认保留个人数据",
+        "同时删除个人数据",
+        "手动创建 GitHub Release",
+        "未知发布者",
+        "重置本机授权",
+        "::1",
+    ]:
+        assert statement in installed_section
+
+    assert "Python 3.11+" in readme
+    assert "uvicorn app.main:app" in readme
+    assert "scripts\\build_windows.ps1" in readme
+
+
+def test_readme_documents_private_local_files_never_enter_git():
+    readme = read_readme()
+
+    for local_item in [
+        "数据库",
+        "DPAPI 密钥",
+        "日志",
+        "备份",
+        "release-config.local.json",
+        "installer-output",
+    ]:
+        assert local_item in readme
+    assert "不会进入 Git" in readme
+
+
+def test_windows_release_checklist_covers_desktop_acceptance_contract():
+    checklist_path = ROOT / "docs" / "windows-release-checklist.md"
+    assert checklist_path.is_file()
+    checklist = checklist_path.read_text(encoding="utf-8")
+
+    for statement in [
+        "全新安装",
+        "开始菜单",
+        "桌面快捷方式",
+        "重复启动",
+        "授权",
+        "同步钱包流水",
+        "关闭并重新打开",
+        "覆盖升级",
+        "旧版 v2",
+        "源数据库",
+        "缺少 WebView2",
+        "保留个人数据",
+        "删除个人数据",
+        "第二台干净电脑",
+        "卸载",
+        "损坏密钥",
+    ]:
+        assert statement in checklist
