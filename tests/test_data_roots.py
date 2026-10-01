@@ -387,10 +387,12 @@ def test_remove_owned_root_keeps_quarantine_when_delete_fails(tmp_path, monkeypa
     write_data_root_marker(root, marker)
     (root / "keep.txt").write_text("keep", encoding="utf-8")
 
-    def fail_delete(path):
+    def fail_delete(path, identity):
         raise OSError("simulated removal failure")
 
-    monkeypatch.setattr(data_roots.shutil, "rmtree", fail_delete)
+    monkeypatch.setattr(
+        data_roots, "_delete_quarantined_tree", fail_delete, raising=False
+    )
 
     with pytest.raises(DataRootValidationError) as caught:
         remove_owned_data_root(marker.reference)
@@ -400,6 +402,35 @@ def test_remove_owned_root_keeps_quarantine_when_delete_fails(tmp_path, monkeypa
     quarantines = list(tmp_path.glob(".eve-income-tracker-removing-*"))
     assert len(quarantines) == 1
     assert (quarantines[0] / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_remove_owned_root_rejects_swap_at_final_deletion_boundary(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    marker = marker_for(root)
+    write_data_root_marker(root, marker)
+    (root / "original.txt").write_text("original", encoding="utf-8")
+    moved_original = tmp_path / "moved-original"
+    real_scan = data_roots._reject_reparse_tree
+
+    def swap_after_final_scan(path):
+        real_scan(path)
+        if path.name.startswith(".eve-income-tracker-removing-"):
+            os.replace(path, moved_original)
+            path.mkdir()
+            (path / "replacement.txt").write_text("replacement", encoding="utf-8")
+
+    monkeypatch.setattr(data_roots, "_reject_reparse_tree", swap_after_final_scan)
+
+    with pytest.raises(DataRootValidationError):
+        remove_owned_data_root(marker.reference)
+
+    assert (moved_original / "original.txt").read_text(encoding="utf-8") == "original"
+    replacement_files = list(tmp_path.rglob("replacement.txt"))
+    assert len(replacement_files) == 1
+    assert replacement_files[0].read_text(encoding="utf-8") == "replacement"
 
 
 def test_new_root_rejects_parent_traversal_and_nonempty_target(tmp_path):

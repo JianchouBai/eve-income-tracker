@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import stat
 import sys
 import tempfile
@@ -14,6 +13,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from app.paths import APP_DATA_DIRECTORY, PROJECT_ROOT, AppPaths, resolve_app_paths
+from app.windows_owned_delete import delete_tree_bound
 
 MARKER_NAME = ".eve-income-tracker-data.json"
 APP_ID = "59D95F12-7D3B-4C8A-A57D-98F836769441"
@@ -300,6 +300,10 @@ def _restore_quarantined_root(quarantine: Path, root: Path) -> None:
         raise DataRootValidationError("remove_restore_failed") from None
 
 
+def _delete_quarantined_tree(quarantine: Path, identity: tuple[int, int]) -> None:
+    delete_tree_bound(quarantine, identity)
+
+
 def remove_owned_data_root(reference: DataRootReference) -> None:
     root = _validate_reference(reference)
     _reject_unsafe_root(root)
@@ -331,6 +335,6 @@ def remove_owned_data_root(reference: DataRootReference) -> None:
         _restore_quarantined_root(quarantine, root)
         raise
     try:
-        shutil.rmtree(quarantine)
+        _delete_quarantined_tree(quarantine, identity)
     except OSError:
         raise DataRootValidationError("remove_failed") from None
