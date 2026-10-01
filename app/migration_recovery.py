@@ -5,9 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
+import stat
 import tempfile
+import zlib
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
@@ -26,6 +29,8 @@ _MANIFEST_FIELDS = frozenset(
 )
 _ENTRIES = frozenset({DATABASE_NAME, KEY_NAME, MANIFEST_NAME})
 _RETENTION_AGE = timedelta(days=7)
+_MANIFEST_LIMIT = 4096
+_TEMP_NAME = re.compile(r"recovery-(?:db|archive|update)-[a-z0-9_]{8}\.tmp\Z")
 
 
 class RecoverySnapshotError(ValueError):
@@ -110,8 +115,15 @@ class RecoverySnapshotService:
                     for name in names
                 ):
                     raise ValueError
-                manifest_bytes = archive.read(MANIFEST_NAME)
-                if len(manifest_bytes) > 4096:
+                manifest_info = archive.getinfo(MANIFEST_NAME)
+                if manifest_info.file_size > _MANIFEST_LIMIT:
+                    raise ValueError
+                with archive.open(MANIFEST_NAME) as manifest_stream:
+                    manifest_bytes = manifest_stream.read(_MANIFEST_LIMIT + 1)
+                if (
+                    len(manifest_bytes) > _MANIFEST_LIMIT
+                    or len(manifest_bytes) != manifest_info.file_size
+                ):
                     raise ValueError
                 manifest = json.loads(manifest_bytes.decode("utf-8"))
                 if not isinstance(manifest, dict) or set(manifest) != _MANIFEST_FIELDS:
@@ -148,7 +160,18 @@ class RecoverySnapshotService:
                     if not size or actual != expected:
                         raise ValueError
             return created, starts
-        except (OSError, BadZipFile, EOFError, KeyError, UnicodeError, ValueError):
+        except (
+            OSError,
+            BadZipFile,
+            EOFError,
+            KeyError,
+            UnicodeError,
+            ValueError,
+            RuntimeError,
+            NotImplementedError,
+            TypeError,
+            zlib.error,
+        ):
             raise RecoverySnapshotError("snapshot_invalid") from None
 
     def inspect(self, paths: AppPaths) -> RecoverySnapshotInfo | None:
@@ -211,14 +234,9 @@ class RecoverySnapshotService:
             if database_temp is not None:
                 database_temp.unlink(missing_ok=True)
 
-    def record_success_and_prune(self, paths: AppPaths) -> RecoverySnapshotInfo | None:
-        info = self.inspect(paths)
-        if info is None:
-            return None
-        starts = info.successful_starts + 1
-        if starts >= 3 and self._now() - info.created_at >= _RETENTION_AGE:
-            self.delete(paths)
-            return None
+    def _replace_start_count(
+        self, paths: AppPaths, info: RecoverySnapshotInfo, starts: int
+    ) -> RecoverySnapshotInfo:
         temporary: Path | None = None
         try:
             temporary = _temporary_file(paths.backups_dir, "recovery-update-")
@@ -248,11 +266,62 @@ class RecoverySnapshotService:
             return self.inspect(paths)
         except RecoverySnapshotError:
             raise
-        except (OSError, BadZipFile, EOFError, ValueError):
+        except (OSError, BadZipFile, EOFError, ValueError, RuntimeError, zlib.error):
             raise RecoverySnapshotError("snapshot_write_failed") from None
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+    def record_success_and_prune(self, paths: AppPaths) -> RecoverySnapshotInfo | None:
+        info = self.inspect(paths)
+        if info is None:
+            return None
+        starts = info.successful_starts + 1
+        if starts >= 3 and self._now() - info.created_at >= _RETENTION_AGE:
+            self.delete(paths)
+            return None
+        return self._replace_start_count(paths, info, starts)
+
+    def record_failed_start(self, paths: AppPaths) -> RecoverySnapshotInfo | None:
+        """Reset the consecutive-start count after a failed real launch."""
+        info = self.inspect(paths)
+        if info is None or info.successful_starts == 0:
+            return info
+        return self._replace_start_count(paths, info, 0)
+
+    def sweep_stale_temps(self, paths: AppPaths) -> int:
+        """Remove abandoned service temp files; caller holds the single-instance lock."""
+        directory = paths.backups_dir
+        try:
+            if directory.is_symlink():
+                raise RecoverySnapshotError("snapshot_cleanup_failed")
+            if not directory.exists():
+                return 0
+            for component in (directory, *directory.parents):
+                details = component.lstat()
+                if stat.S_ISLNK(details.st_mode) or (
+                    getattr(details, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                ):
+                    raise RecoverySnapshotError("snapshot_cleanup_failed")
+            if not directory.is_dir():
+                raise RecoverySnapshotError("snapshot_cleanup_failed")
+            freed = 0
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if _TEMP_NAME.fullmatch(entry.name) is None:
+                        continue
+                    details = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(details.st_mode) or (
+                        getattr(details, "st_file_attributes", 0)
+                        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                    ):
+                        continue
+                    Path(entry.path).unlink()
+                    freed += details.st_size
+            return freed
+        except OSError:
+            raise RecoverySnapshotError("snapshot_cleanup_failed") from None
 
     def delete(self, paths: AppPaths) -> bool:
         try:

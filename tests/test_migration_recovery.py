@@ -5,6 +5,7 @@ from zipfile import ZipFile
 
 import pytest
 
+from app import migration_recovery
 from app.migration_recovery import RecoverySnapshotError, RecoverySnapshotService
 from app.paths import resolve_app_paths
 
@@ -152,3 +153,124 @@ def test_inspect_rejects_corruption_with_stable_non_leaking_code(tmp_path, damag
     assert caught.value.code == "snapshot_invalid"
     assert str(tmp_path) not in str(caught.value)
     assert "secret" not in str(caught.value)
+
+
+def test_failed_start_resets_consecutive_successes_without_changing_creation_time(
+    tmp_path,
+):
+    source, destination = fixture_paths(tmp_path)
+    now = [NOW]
+    service = RecoverySnapshotService(clock=lambda: now[0])
+    original = service.create(source, destination)
+    now[0] = NOW + timedelta(days=7)
+    assert service.record_success_and_prune(destination).successful_starts == 1
+    reset = service.record_failed_start(destination)
+    assert reset.successful_starts == 0
+    assert reset.created_at == original.created_at
+    assert reset.archive_path == original.archive_path
+    assert service.record_success_and_prune(destination).successful_starts == 1
+    assert service.record_success_and_prune(destination).successful_starts == 2
+    assert service.inspect(destination) is not None
+    assert service.record_success_and_prune(destination) is None
+    assert service.record_failed_start(destination) is None
+
+
+def test_failed_start_reset_preserves_archive_when_atomic_replace_fails(
+    tmp_path, monkeypatch
+):
+    source, destination = fixture_paths(tmp_path)
+    service = RecoverySnapshotService(clock=lambda: NOW)
+    original = service.create(source, destination)
+    service.record_success_and_prune(destination)
+    previous = original.archive_path.read_bytes()
+
+    def fail_replace(_source, _destination):
+        raise OSError("secret path cannot be replaced")
+
+    monkeypatch.setattr(migration_recovery.os, "replace", fail_replace)
+    with pytest.raises(RecoverySnapshotError) as caught:
+        service.record_failed_start(destination)
+    assert caught.value.code == "snapshot_write_failed"
+    assert original.archive_path.read_bytes() == previous
+    assert "secret" not in str(caught.value)
+
+
+def test_oversized_manifest_is_rejected_before_decompression(tmp_path, monkeypatch):
+    source, destination = fixture_paths(tmp_path)
+    service = RecoverySnapshotService(clock=lambda: NOW)
+    info = service.create(source, destination)
+    with ZipFile(info.archive_path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    entries["recovery-manifest.json"] = b"x" * 100_000
+    with ZipFile(info.archive_path, "w") as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data, compress_type=8)
+    original_open = ZipFile.open
+
+    def reject_manifest_decompression(self, name, *args, **kwargs):
+        if name == "recovery-manifest.json":
+            raise AssertionError("oversized manifest was decompressed")
+        return original_open(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(ZipFile, "open", reject_manifest_decompression)
+    with pytest.raises(RecoverySnapshotError) as caught:
+        service.inspect(destination)
+    assert caught.value.code == "snapshot_invalid"
+
+
+def test_encrypted_member_raises_stable_snapshot_invalid(tmp_path):
+    source, destination = fixture_paths(tmp_path)
+    service = RecoverySnapshotService(clock=lambda: NOW)
+    info = service.create(source, destination)
+    raw = bytearray(info.archive_path.read_bytes())
+    local = raw.find(b"PK\x03\x04")
+    central = raw.find(b"PK\x01\x02")
+    assert local >= 0 and central >= 0
+    raw[local + 6] |= 1
+    raw[central + 8] |= 1
+    info.archive_path.write_bytes(raw)
+
+    with pytest.raises(RecoverySnapshotError) as caught:
+        service.inspect(destination)
+    assert caught.value.code == "snapshot_invalid"
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_stale_sweep_removes_only_regular_service_temp_files(tmp_path):
+    source, destination = fixture_paths(tmp_path)
+    service = RecoverySnapshotService(clock=lambda: NOW)
+    info = service.create(source, destination)
+    backups = destination.backups_dir
+    stale = [
+        backups / "recovery-db-abcdefgh.tmp",
+        backups / "recovery-archive-12345678.tmp",
+        backups / "recovery-update-abc12345.tmp",
+    ]
+    for path in stale:
+        path.write_bytes(b"old")
+    lookalikes = [
+        backups / "recovery-db-short.tmp",
+        backups / "recovery-database-abcdefgh.tmp",
+        backups / "ordinary-abcdefgh.tmp",
+    ]
+    for path in lookalikes:
+        path.write_bytes(b"keep")
+    directory = backups / "recovery-db-87654321.tmp"
+    directory.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"outside")
+    link = backups / "recovery-db-zyxwvuts.tmp"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        link = None
+
+    assert service.sweep_stale_temps(destination) == 9
+    assert all(not path.exists() for path in stale)
+    assert all(path.read_bytes() == b"keep" for path in lookalikes)
+    assert directory.is_dir()
+    assert info.archive_path.exists()
+    assert outside.read_bytes() == b"outside"
+    if link is not None:
+        assert link.is_symlink()
+    assert service.sweep_stale_temps(destination) == 0
