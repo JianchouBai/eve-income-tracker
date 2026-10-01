@@ -49,6 +49,11 @@ class RecoverySnapshotInfo:
     successful_starts: int
 
 
+def is_owned_recovery_temp_name(name: str) -> bool:
+    """Recognize only this service's generated temporary-file basenames."""
+    return _TEMP_NAME.fullmatch(name) is not None
+
+
 def _temporary_file(directory: Path, prefix: str) -> Path:
     descriptor, name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
     os.close(descriptor)
@@ -308,7 +313,7 @@ class RecoverySnapshotService:
             freed = 0
             with os.scandir(directory) as entries:
                 for entry in entries:
-                    if _TEMP_NAME.fullmatch(entry.name) is None:
+                    if not is_owned_recovery_temp_name(entry.name):
                         continue
                     details = entry.stat(follow_symlinks=False)
                     if not stat.S_ISREG(details.st_mode) or (

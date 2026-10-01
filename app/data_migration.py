@@ -27,6 +27,8 @@ from app.data_roots import (
     _directory_identity,
     _reject_reparse_components,
     _reject_reparse_tree,
+    _reject_unsafe_root,
+    _validate_reference,
     read_data_root_marker,
     remove_owned_data_root,
     validate_existing_data_root,
@@ -34,7 +36,11 @@ from app.data_roots import (
     write_data_root_marker,
     write_staged_data_root_marker,
 )
-from app.migration_recovery import ARCHIVE_NAME, RecoverySnapshotService
+from app.migration_recovery import (
+    ARCHIVE_NAME,
+    RecoverySnapshotService,
+    is_owned_recovery_temp_name,
+)
 from app.paths import AppPaths, resolve_app_paths
 from app.windows_owned_delete import delete_tree_bound
 
@@ -122,6 +128,10 @@ def _inventory(paths: AppPaths) -> tuple[list[Path], list[Path]]:
         if stat.S_ISDIR(details.st_mode):
             directories.append(relative)
         elif stat.S_ISREG(details.st_mode):
+            if item.parent == paths.backups_dir and is_owned_recovery_temp_name(
+                item.name
+            ):
+                continue
             files.append(relative)
         else:
             raise DataMigrationError("source_invalid")
@@ -366,10 +376,29 @@ class DataMigrationService:
             raise DataMigrationError("cleanup_state_failed") from None
         return MigrationResult(reference, True, None)
 
+    def _cleanup_root_is_absent(self, reference: DataRootReference) -> bool:
+        root = _validate_reference(reference)
+        _reject_unsafe_root(root, self._resource_root.resolve(strict=False))
+        if root.parent == Path.home().resolve(strict=False):
+            raise DataRootValidationError("path_unsafe")
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            # A missing root alone can mean an offline drive. Require its exact
+            # canonical parent to remain an accessible, real directory.
+            _reject_reparse_components(root.parent)
+            details = root.parent.stat(follow_symlinks=False)
+            if not stat.S_ISDIR(details.st_mode):
+                raise DataRootValidationError("path_unavailable")
+            return True
+        return False
+
     def retry_pending_cleanup(self) -> bool:
         try:
             pending = self._store.read_pending_cleanup()
             if pending is None:
+                # Retire any ID-only residue left after clearing the commit field.
+                self._store.clear_pending_cleanup()
                 return True
             current = self._store.read_current()
             if (
@@ -382,7 +411,8 @@ class DataMigrationService:
             validate_existing_data_root(
                 current, resource_root=self._resource_root, require_writable=False
             )
-            remove_owned_data_root(pending.reference)
+            if not self._cleanup_root_is_absent(pending.reference):
+                remove_owned_data_root(pending.reference)
             self._store.clear_pending_cleanup()
             return True
         except DataRootValidationError as exc:

@@ -637,3 +637,119 @@ def test_failed_cleanup_retry_restore_clears_misleading_original_reference(
     assert service.retry_pending_cleanup() is False
     assert store.read_pending_cleanup() is None
     assert (reference.root / "foreign").read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize("clear_field", ["PendingCleanupRoot", "PendingCleanupRootId"])
+def test_successful_deletion_with_interrupted_journal_clear_converges(
+    tmp_path, monkeypatch, clear_field
+):
+    paths, reference, store, parent = make_source(tmp_path)
+    service = service_for(paths, store)
+    real_delete = store.backend.delete
+    with monkeypatch.context() as patch:
+
+        def interrupt(name):
+            if name == clear_field:
+                fail()
+            real_delete(name)
+
+        patch.setattr(store.backend, "delete", interrupt)
+        with pytest.raises(DataMigrationError) as caught:
+            service.migrate(reference, parent, create_recovery=False)
+        assert caught.value.code == "cleanup_state_failed"
+    assert not reference.root.exists()
+    assert reference.root.parent.is_dir()
+    assert store.read_current().root == parent / "EVE Income Tracker"
+    assert service.retry_pending_cleanup() is True
+    assert store.read_pending_cleanup() is None
+    assert "PendingCleanupRootId" not in store.backend.values
+    assert service.retry_pending_cleanup() is True
+    next_parent = tmp_path / "volume-next"
+    next_parent.mkdir()
+    result = service.migrate(store.read_current(), next_parent, create_recovery=False)
+    assert result.original_removed
+
+
+@pytest.mark.parametrize("parent_state", ["offline", "denied", "protected", "reparse"])
+def test_missing_cleanup_root_is_not_completed_on_unavailable_or_unsafe_parent(
+    tmp_path, monkeypatch, parent_state
+):
+    from app import data_roots
+
+    paths, reference, store, parent = make_source(tmp_path)
+    service = service_for(paths, store)
+    real_remove = data_migration.remove_owned_data_root
+    with monkeypatch.context() as patch:
+        patch.setattr(data_migration, "remove_owned_data_root", fail)
+        service.migrate(reference, parent, create_recovery=False)
+    real_remove(reference)
+    old_parent = reference.root.parent
+    link = None
+    if parent_state == "offline":
+        old_parent.rmdir()
+    elif parent_state == "denied":
+        real_stat = Path.stat
+
+        def denied(path, **kwargs):
+            if path == old_parent:
+                raise PermissionError("offline or denied")
+            return real_stat(path, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", denied)
+    elif parent_state == "protected":
+        monkeypatch.setattr(data_roots, "PROJECT_ROOT", old_parent)
+    else:
+        outside = tmp_path / "outside-parent"
+        outside.mkdir()
+        old_parent.rmdir()
+        link = old_parent
+        if os.name == "nt":
+            import subprocess
+
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                check=True,
+                capture_output=True,
+            )
+        else:
+            link.symlink_to(outside, target_is_directory=True)
+    try:
+        assert service.retry_pending_cleanup() is False
+        assert store.read_pending_cleanup() == PendingCleanup(reference)
+        assert store.read_current().root == parent / "EVE Income Tracker"
+    finally:
+        if link is not None:
+            if os.name == "nt":
+                link.rmdir()
+            else:
+                link.unlink()
+
+
+def test_migration_excludes_only_owned_recovery_temp_files_in_backups(tmp_path):
+    paths, reference, store, parent = make_source(tmp_path)
+    service = service_for(paths, store)
+    baseline = service.estimate(reference, parent, create_recovery=False).copy_bytes
+    omitted = [
+        "backups/recovery-db-abcdefgh.tmp",
+        "backups/recovery-archive-12345678.tmp",
+        "backups/recovery-update-abc_1234.tmp",
+    ]
+    kept = [
+        "backups/recovery-db-short.tmp",
+        "backups/recovery-db-ABCDEFGHI.tmp",
+        "backups/ordinary-abcdefgh.tmp",
+        "logs/recovery-db-abcdefgh.tmp",
+        "backups/nested/recovery-db-abcdefgh.tmp",
+        "backups/recovery-db-zyxwvuts.tmp/owned-by-user",
+    ]
+    for name in omitted + kept:
+        path = paths.data_root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"keep")
+    estimate = service.estimate(reference, parent, create_recovery=False)
+    assert estimate.copy_bytes == baseline + 24
+    result = service.migrate(reference, parent, create_recovery=False)
+    for name in omitted:
+        assert not (result.reference.root / name).exists()
+    for name in kept:
+        assert (result.reference.root / name).read_bytes() == b"keep"

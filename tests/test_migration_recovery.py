@@ -289,3 +289,21 @@ def test_unexpected_validator_type_error_is_not_disguised_as_corruption(
     monkeypatch.setattr(migration_recovery, "_member_hash", programming_error)
     with pytest.raises(TypeError, match="unexpected validator defect"):
         service.inspect(destination)
+
+
+@pytest.mark.parametrize(
+    ("name", "owned"),
+    [
+        ("recovery-db-abcdefgh.tmp", True),
+        ("recovery-archive-12345678.tmp", True),
+        ("recovery-update-abc_1234.tmp", True),
+        ("recovery-db-short.tmp", False),
+        ("recovery-db-ABCDEFGH.tmp", False),
+        ("recovery-db-abcdefgh.tmp.bak", False),
+        ("recovery-db-abcdefgh.tmp\n", False),
+        ("ordinary-abcdefgh.tmp", False),
+        ("backups/recovery-db-abcdefgh.tmp", False),
+    ],
+)
+def test_owned_recovery_temp_predicate_matches_only_generated_names(name, owned):
+    assert migration_recovery.is_owned_recovery_temp_name(name) is owned

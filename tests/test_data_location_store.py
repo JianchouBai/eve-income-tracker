@@ -7,6 +7,7 @@ from app.data_location_store import (
     DATA_ROOT_ID,
     DATA_ROOT_SCHEMA,
     PENDING_CLEANUP_ROOT,
+    PENDING_CLEANUP_ROOT_ID,
     PENDING_MIGRATION_TARGET,
     PREVIOUS_DATA_ROOT,
     PREVIOUS_DATA_ROOT_ID,
@@ -250,3 +251,84 @@ def test_pending_recovery_rejects_bool_reg_dword(tmp_path):
     b.values[PENDING_MIGRATION_TARGET] = (str(tmp_path / "selected"), REG_SZ)
     b.values["PendingMigrationCreateRecovery"] = (True, REG_DWORD)
     invalid(WindowsDataLocationStore(b).read_pending_migration)
+
+
+@pytest.mark.parametrize("stop", range(3))
+def test_pending_cleanup_write_uses_root_as_commit_field(tmp_path, stop):
+    backend = Backend()
+    store = WindowsDataLocationStore(backend)
+    pending = PendingCleanup(ref(tmp_path, "old"))
+    backend.fail_after = stop
+    if stop < 2:
+        with pytest.raises(OSError):
+            store.write_pending_cleanup(pending)
+        assert store.read_pending_cleanup() is None
+    else:
+        store.write_pending_cleanup(pending)
+        assert store.read_pending_cleanup() == pending
+    backend.fail_after = None
+    store.clear_pending_cleanup()
+    store.write_pending_cleanup(pending)
+    assert store.read_pending_cleanup() == pending
+
+
+@pytest.mark.parametrize("stop", range(3))
+def test_pending_cleanup_clear_is_readable_at_every_crash_boundary(tmp_path, stop):
+    backend = Backend()
+    store = WindowsDataLocationStore(backend)
+    pending = PendingCleanup(ref(tmp_path, "old"))
+    store.write_pending_cleanup(pending)
+    backend.fail_delete_after = stop
+    if stop < 2:
+        with pytest.raises(OSError):
+            store.clear_pending_cleanup()
+    else:
+        store.clear_pending_cleanup()
+    assert store.read_pending_cleanup() == (pending if stop == 0 else None)
+    backend.fail_delete_after = None
+    store.clear_pending_cleanup()
+    store.clear_pending_cleanup()
+    assert store.read_pending_cleanup() is None
+    assert PENDING_CLEANUP_ROOT not in backend.values
+    assert PENDING_CLEANUP_ROOT_ID not in backend.values
+
+
+def test_pending_cleanup_id_residue_is_uncommitted_but_root_requires_id(tmp_path):
+    backend = Backend()
+    store = WindowsDataLocationStore(backend)
+    backend.values[PENDING_CLEANUP_ROOT_ID] = ("unused incomplete residue", REG_SZ)
+    assert store.read_pending_cleanup() is None
+    backend.values.clear()
+    backend.values[PENDING_CLEANUP_ROOT] = (str(ref(tmp_path, "old").root), REG_SZ)
+    invalid(store.read_pending_cleanup)
+
+
+@pytest.mark.parametrize(
+    "kind", ["relative", "traversal", "nul", "wrong-type", "drive-relative"]
+)
+def test_pending_cleanup_lexical_path_parser_keeps_validation(tmp_path, kind):
+    backend = Backend()
+    pending = ref(tmp_path, "old")
+    choices = {
+        "relative": ("relative/path", REG_SZ),
+        "traversal": (str(tmp_path / "old") + "/../EVE Income Tracker", REG_SZ),
+        "nul": (str(pending.root) + "\0tail", REG_SZ),
+        "wrong-type": (42, REG_DWORD),
+        "drive-relative": (tmp_path.drive + "relative", REG_SZ),
+    }
+    backend.values[PENDING_CLEANUP_ROOT] = choices[kind]
+    backend.values[PENDING_CLEANUP_ROOT_ID] = (pending.root_id, REG_SZ)
+    invalid(WindowsDataLocationStore(backend).read_pending_cleanup)
+
+
+def test_pending_cleanup_parser_normalizes_dot_and_separators_lexically(tmp_path):
+    backend = Backend()
+    pending = ref(tmp_path, "old")
+    backend.values[PENDING_CLEANUP_ROOT] = (
+        str(tmp_path) + "/old/./EVE Income Tracker",
+        REG_SZ,
+    )
+    backend.values[PENDING_CLEANUP_ROOT_ID] = (pending.root_id, REG_SZ)
+    assert WindowsDataLocationStore(backend).read_pending_cleanup() == PendingCleanup(
+        pending
+    )

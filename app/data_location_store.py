@@ -63,12 +63,14 @@ class DataLocationStore(Protocol):
     def clear_pending_cleanup(self) -> None: ...
 
 
-def _path(value: object, kind: int) -> Path:
+def _path(value: object, kind: int, *, resolve_links: bool = True) -> Path:
     if kind != REG_SZ or not isinstance(value, str) or not value or "\0" in value:
         raise DataLocationStoreError("registry_invalid")
     path = Path(value)
     if not path.is_absolute() or ".." in path.parts:
         raise DataLocationStoreError("registry_invalid")
+    if not resolve_links:
+        return path
     try:
         return path.resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
@@ -316,12 +318,18 @@ class WindowsDataLocationStore:
 
     def read_pending_cleanup(self) -> PendingCleanup | None:
         root = self.backend.read(PENDING_CLEANUP_ROOT)
-        root_id = self.backend.read(PENDING_CLEANUP_ROOT_ID)
-        if root is root_id is None:
+        # Root is the commit field: ID-only residue is an interrupted write
+        # or clear, never an actionable cleanup request.
+        if root is None:
             return None
-        if root is None or root_id is None:
+        root_id = self.backend.read(PENDING_CLEANUP_ROOT_ID)
+        if root_id is None:
             raise DataLocationStoreError("registry_invalid")
-        return PendingCleanup(DataRootReference(_path(*root), _id(*root_id), 1))
+        # Preserve the registered path so cleanup can reject a parent that
+        # became a junction instead of silently resolving to its new target.
+        return PendingCleanup(
+            DataRootReference(_path(*root, resolve_links=False), _id(*root_id), 1)
+        )
 
     def write_pending_cleanup(self, pending: PendingCleanup) -> None:
         if not isinstance(pending, PendingCleanup):
