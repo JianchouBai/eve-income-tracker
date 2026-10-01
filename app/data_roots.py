@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.paths import APP_DATA_DIRECTORY, PROJECT_ROOT, AppPaths, resolve_app_paths
 
@@ -96,14 +96,18 @@ def _protected_directories() -> tuple[Path, ...]:
     )
 
 
-def _reject_unsafe_root(root: Path) -> None:
+def _reject_unsafe_root(root: Path, *additional_protected: Path) -> None:
     if (
         root == Path(root.anchor)
         or root == Path.home().resolve(strict=False)
         or root.name != APP_DATA_DIRECTORY
     ):
         raise DataRootValidationError("path_unsafe")
-    if any(_inside(root, protected) for protected in _protected_directories()):
+    protected_directories = (*_protected_directories(), *additional_protected)
+    if any(
+        _inside(root, protected) or _inside(protected, root)
+        for protected in protected_directories
+    ):
         raise DataRootValidationError("path_unsafe")
 
 
@@ -179,10 +183,11 @@ def write_data_root_marker(root: Path, marker: DataRootMarker) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def read_data_root_marker(root: Path) -> DataRootMarker:
-    _reject_reparse_components(root)
-    canonical_root = _canonical(root, reject_traversal=True)
-    marker_path = canonical_root / MARKER_NAME
+def _read_data_root_marker_at(directory: Path, expected_root: Path) -> DataRootMarker:
+    _reject_reparse_components(directory)
+    canonical_directory = _canonical(directory, reject_traversal=True)
+    canonical_root = _canonical(expected_root, reject_traversal=True)
+    marker_path = canonical_directory / MARKER_NAME
     if _is_reparse(marker_path):
         raise DataRootValidationError("path_reparse")
     try:
@@ -204,6 +209,10 @@ def read_data_root_marker(root: Path) -> DataRootMarker:
     return marker
 
 
+def read_data_root_marker(root: Path) -> DataRootMarker:
+    return _read_data_root_marker_at(root, root)
+
+
 def validate_existing_data_root(
     reference: DataRootReference,
     *,
@@ -211,7 +220,7 @@ def validate_existing_data_root(
     require_writable: bool = True,
 ) -> AppPaths:
     root = _validate_reference(reference)
-    _reject_unsafe_root(root)
+    _reject_unsafe_root(root, resource_root.resolve(strict=False))
     if not root.is_dir():
         raise DataRootValidationError("path_unavailable")
     marker = read_data_root_marker(root)
@@ -272,6 +281,25 @@ def _reject_reparse_tree(root: Path) -> None:
         raise DataRootValidationError("path_unavailable") from None
 
 
+def _directory_identity(root: Path) -> tuple[int, int]:
+    try:
+        details = root.stat(follow_symlinks=False)
+    except OSError:
+        raise DataRootValidationError("path_unavailable") from None
+    if not stat.S_ISDIR(details.st_mode) or not details.st_ino:
+        raise DataRootValidationError("remove_identity_unavailable")
+    return details.st_dev, details.st_ino
+
+
+def _restore_quarantined_root(quarantine: Path, root: Path) -> None:
+    try:
+        if root.exists() or _is_reparse(root):
+            raise DataRootValidationError("remove_restore_failed")
+        os.rename(quarantine, root)
+    except OSError:
+        raise DataRootValidationError("remove_restore_failed") from None
+
+
 def remove_owned_data_root(reference: DataRootReference) -> None:
     root = _validate_reference(reference)
     _reject_unsafe_root(root)
@@ -283,7 +311,26 @@ def remove_owned_data_root(reference: DataRootReference) -> None:
     if marker.state != "ready":
         raise DataRootValidationError("marker_incomplete")
     _reject_reparse_tree(root)
+    identity = _directory_identity(root)
+    quarantine = root.with_name(f".eve-income-tracker-removing-{uuid4().hex}")
+    if quarantine.exists() or _is_reparse(quarantine):
+        raise DataRootValidationError("remove_failed")
     try:
-        shutil.rmtree(root)
+        os.replace(root, quarantine)
+    except OSError:
+        raise DataRootValidationError("remove_failed") from None
+    try:
+        _reject_reparse_components(quarantine)
+        if _directory_identity(quarantine) != identity:
+            raise DataRootValidationError("remove_identity_changed")
+        moved_marker = _read_data_root_marker_at(quarantine, root)
+        if moved_marker != marker:
+            raise DataRootValidationError("marker_mismatch")
+        _reject_reparse_tree(quarantine)
+    except DataRootValidationError:
+        _restore_quarantined_root(quarantine, root)
+        raise
+    try:
+        shutil.rmtree(quarantine)
     except OSError:
         raise DataRootValidationError("remove_failed") from None

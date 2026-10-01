@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from app import data_roots
 from app.data_roots import (
     DataRootMarker,
     DataRootReference,
@@ -158,6 +159,20 @@ def test_existing_default_root_under_user_profile_is_allowed(tmp_path, monkeypat
     assert paths.data_root == root
 
 
+def test_existing_root_rejects_install_resource_nested_inside_it(tmp_path):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    marker = marker_for(root)
+    write_data_root_marker(root, marker)
+    nested_program = root / "program"
+    nested_program.mkdir()
+
+    with pytest.raises(DataRootValidationError) as caught:
+        validate_existing_data_root(marker.reference, resource_root=nested_program)
+
+    assert caught.value.code == "path_unsafe"
+
+
 @pytest.mark.parametrize("mismatch", ["id", "schema", "incomplete"])
 def test_existing_root_rejects_mismatched_or_incomplete_marker(tmp_path, mismatch):
     root = tmp_path / "EVE Income Tracker"
@@ -226,6 +241,165 @@ def test_remove_owned_root_rejects_user_home_even_with_matching_marker(
         remove_owned_data_root(marker.reference)
 
     assert root.exists()
+
+
+def test_remove_owned_root_rejects_source_nested_inside_it(tmp_path, monkeypatch):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    marker = marker_for(root)
+    write_data_root_marker(root, marker)
+    source = root / "source"
+    source.mkdir()
+    private = source / "keep.txt"
+    private.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(data_roots, "PROJECT_ROOT", source)
+
+    with pytest.raises(DataRootValidationError) as caught:
+        remove_owned_data_root(marker.reference)
+
+    assert caught.value.code == "path_unsafe"
+    assert private.read_text(encoding="utf-8") == "keep"
+
+
+def test_remove_owned_root_revalidates_directory_moved_to_quarantine(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    marker = marker_for(root)
+    write_data_root_marker(root, marker)
+    original_private = root / "original.txt"
+    original_private.write_text("original", encoding="utf-8")
+    moved_original = tmp_path / "moved-original"
+    real_replace = os.replace
+
+    def replace_after_swap(source, destination):
+        if Path(source) == root:
+            real_replace(root, moved_original)
+            root.mkdir()
+            (root / "replacement.txt").write_text("replacement", encoding="utf-8")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(data_roots.os, "replace", replace_after_swap)
+
+    with pytest.raises(DataRootValidationError):
+        remove_owned_data_root(marker.reference)
+
+    assert (moved_original / "original.txt").read_text(encoding="utf-8") == "original"
+    assert (root / "replacement.txt").read_text(encoding="utf-8") == "replacement"
+    assert not list(tmp_path.glob(".eve-income-tracker-removing-*"))
+
+
+def test_remove_owned_root_rejects_replacement_even_with_copied_marker(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    marker = marker_for(root)
+    write_data_root_marker(root, marker)
+    (root / "original.txt").write_text("original", encoding="utf-8")
+    moved_original = tmp_path / "moved-original"
+    real_replace = os.replace
+
+    def replace_after_swap(source, destination):
+        if Path(source) == root:
+            real_replace(root, moved_original)
+            root.mkdir()
+            (root / ".eve-income-tracker-data.json").write_bytes(
+                (moved_original / ".eve-income-tracker-data.json").read_bytes()
+            )
+            (root / "replacement.txt").write_text("replacement", encoding="utf-8")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(data_roots.os, "replace", replace_after_swap)
+
+    with pytest.raises(DataRootValidationError) as caught:
+        remove_owned_data_root(marker.reference)
+
+    assert caught.value.code == "remove_identity_changed"
+    assert (moved_original / "original.txt").read_text(encoding="utf-8") == "original"
+    assert (root / "replacement.txt").read_text(encoding="utf-8") == "replacement"
+    assert not list(tmp_path.glob(".eve-income-tracker-removing-*"))
+
+
+def test_remove_owned_root_preserves_original_when_quarantine_move_fails(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    marker = marker_for(root)
+    write_data_root_marker(root, marker)
+    private = root / "keep.txt"
+    private.write_text("keep", encoding="utf-8")
+
+    def fail_move(source, destination):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(data_roots.os, "replace", fail_move)
+
+    with pytest.raises(DataRootValidationError) as caught:
+        remove_owned_data_root(marker.reference)
+
+    assert caught.value.code == "remove_failed"
+    assert private.read_text(encoding="utf-8") == "keep"
+
+
+def test_remove_owned_root_keeps_quarantine_when_restore_path_is_occupied(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    marker = marker_for(root)
+    write_data_root_marker(root, marker)
+    moved_original = tmp_path / "moved-original"
+    real_replace = os.replace
+
+    def replace_and_occupy(source, destination):
+        if Path(source) == root:
+            real_replace(root, moved_original)
+            root.mkdir()
+            (root / "replacement.txt").write_text("replacement", encoding="utf-8")
+            real_replace(root, destination)
+            root.mkdir()
+            (root / "new-owner.txt").write_text("new owner", encoding="utf-8")
+            return None
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(data_roots.os, "replace", replace_and_occupy)
+
+    with pytest.raises(DataRootValidationError) as caught:
+        remove_owned_data_root(marker.reference)
+
+    assert caught.value.code == "remove_restore_failed"
+    assert (root / "new-owner.txt").read_text(encoding="utf-8") == "new owner"
+    quarantines = list(tmp_path.glob(".eve-income-tracker-removing-*"))
+    assert len(quarantines) == 1
+    assert (quarantines[0] / "replacement.txt").read_text(
+        encoding="utf-8"
+    ) == "replacement"
+    assert (moved_original / ".eve-income-tracker-data.json").exists()
+
+
+def test_remove_owned_root_keeps_quarantine_when_delete_fails(tmp_path, monkeypatch):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    marker = marker_for(root)
+    write_data_root_marker(root, marker)
+    (root / "keep.txt").write_text("keep", encoding="utf-8")
+
+    def fail_delete(path):
+        raise OSError("simulated removal failure")
+
+    monkeypatch.setattr(data_roots.shutil, "rmtree", fail_delete)
+
+    with pytest.raises(DataRootValidationError) as caught:
+        remove_owned_data_root(marker.reference)
+
+    assert caught.value.code == "remove_failed"
+    assert not root.exists()
+    quarantines = list(tmp_path.glob(".eve-income-tracker-removing-*"))
+    assert len(quarantines) == 1
+    assert (quarantines[0] / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_new_root_rejects_parent_traversal_and_nonempty_target(tmp_path):
