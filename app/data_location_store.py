@@ -20,6 +20,7 @@ PREVIOUS_DATA_ROOT = "PreviousDataRoot"
 PREVIOUS_DATA_ROOT_ID = "PreviousDataRootId"
 PREVIOUS_DATA_ROOT_SCHEMA = "PreviousDataRootSchema"
 PREVIOUS_DATA_ROOT_ABSENT = "PreviousDataRootAbsent"
+CURRENT_SWITCH_COMMITTED = "CurrentSwitchCommitted"
 PENDING_MIGRATION_TARGET = "PendingMigrationTarget"
 PENDING_MIGRATION_CREATE_RECOVERY = "PendingMigrationCreateRecovery"
 PENDING_CLEANUP_ROOT = "PendingCleanupRoot"
@@ -90,6 +91,17 @@ def _schema(value: object, kind: int) -> int:
     if kind != REG_DWORD or type(value) is not int or value != 1:
         raise DataLocationStoreError("registry_invalid")
     return value
+
+
+def _dword(value: tuple[object, int] | None, allowed: tuple[int, ...]) -> int:
+    if (
+        value is None
+        or value[1] != REG_DWORD
+        or type(value[0]) is not int
+        or value[0] not in allowed
+    ):
+        raise DataLocationStoreError("registry_invalid")
+    return value[0]
 
 
 def _reference(reference: DataRootReference) -> DataRootReference:
@@ -168,9 +180,8 @@ class WindowsDataLocationStore:
         absent = self.backend.read(PREVIOUS_DATA_ROOT_ABSENT)
         keys = (PREVIOUS_DATA_ROOT, PREVIOUS_DATA_ROOT_ID, PREVIOUS_DATA_ROOT_SCHEMA)
         if absent is not None:
-            if absent != (1, REG_DWORD) or any(
-                self.backend.read(name) is not None for name in keys
-            ):
+            _dword(absent, (1,))
+            if any(self.backend.read(name) is not None for name in keys):
                 raise DataLocationStoreError("registry_invalid")
             return True, None
         values = [self.backend.read(name) for name in keys]
@@ -180,7 +191,30 @@ class WindowsDataLocationStore:
             _path(*values[0]), _id(*values[1]), _schema(*values[2])
         )
 
+    def _committed(self) -> bool:
+        marker = self.backend.read(CURRENT_SWITCH_COMMITTED)
+        if marker is None:
+            return False
+        _dword(marker, (1,))
+        return True
+
+    def _has_previous_residue(self) -> bool:
+        return any(
+            self.backend.read(name) is not None
+            for name in (
+                PREVIOUS_DATA_ROOT,
+                PREVIOUS_DATA_ROOT_ID,
+                PREVIOUS_DATA_ROOT_SCHEMA,
+                PREVIOUS_DATA_ROOT_ABSENT,
+            )
+        )
+
     def read_current(self) -> DataRootReference | None:
+        if self._committed():
+            current = self._read_reference(DATA_ROOT, DATA_ROOT_ID, DATA_ROOT_SCHEMA)
+            if current is None:
+                raise DataLocationStoreError("registry_invalid")
+            return current
         switched, previous = self._previous()
         return (
             previous
@@ -204,6 +238,8 @@ class WindowsDataLocationStore:
 
     def begin_current_switch(self, reference: DataRootReference) -> None:
         target = _reference(reference)
+        if self._committed():
+            self.finalize_current_switch()
         switched, _ = self._previous()
         if switched:
             raise DataLocationStoreError("registry_invalid")
@@ -218,17 +254,32 @@ class WindowsDataLocationStore:
         self._write_current(target)
 
     def finalize_current_switch(self) -> None:
-        switched, _ = self._previous()
-        if (
-            not switched
-            or self._read_reference(DATA_ROOT, DATA_ROOT_ID, DATA_ROOT_SCHEMA) is None
-        ):
+        committed = self._committed()
+        if not committed:
+            switched, _ = self._previous()
+            if not switched and self._has_previous_residue():
+                raise DataLocationStoreError("registry_invalid")
+        current = self._read_reference(DATA_ROOT, DATA_ROOT_ID, DATA_ROOT_SCHEMA)
+        if current is None:
             raise DataLocationStoreError("registry_invalid")
+        if not committed and switched:
+            self.backend.write(CURRENT_SWITCH_COMMITTED, 1, REG_DWORD)
         self._clear_previous()
+        self.backend.delete(CURRENT_SWITCH_COMMITTED)
 
     def rollback_current_switch(self) -> None:
+        if self._committed():
+            self.finalize_current_switch()
+            return
         switched, previous = self._previous()
         if not switched:
+            if self._has_previous_residue():
+                if (
+                    self._read_reference(DATA_ROOT, DATA_ROOT_ID, DATA_ROOT_SCHEMA)
+                    is None
+                ):
+                    raise DataLocationStoreError("registry_invalid")
+                self._clear_previous()
             return
         if previous is None:
             for name in (DATA_ROOT, DATA_ROOT_ID, DATA_ROOT_SCHEMA):
@@ -242,9 +293,10 @@ class WindowsDataLocationStore:
         recovery = self.backend.read(PENDING_MIGRATION_CREATE_RECOVERY)
         if target is recovery is None:
             return None
-        if target is None or recovery not in ((0, REG_DWORD), (1, REG_DWORD)):
+        if target is None:
             raise DataLocationStoreError("registry_invalid")
-        return PendingMigration(_path(*target), bool(recovery[0]))
+        create_recovery = _dword(recovery, (0, 1))
+        return PendingMigration(_path(*target), bool(create_recovery))
 
     def write_pending_migration(self, pending: PendingMigration) -> None:
         if (

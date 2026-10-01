@@ -31,6 +31,8 @@ class Backend:
         self.values = {}
         self.writes = []
         self.fail_after = None
+        self.fail_delete_after = None
+        self.deletes = []
 
     def read(self, name):
         return self.values.get(name)
@@ -42,7 +44,13 @@ class Backend:
         self.writes.append(name)
 
     def delete(self, name):
+        if (
+            self.fail_delete_after is not None
+            and len(self.deletes) == self.fail_delete_after
+        ):
+            raise OSError("interrupted delete")
         self.values.pop(name, None)
+        self.deletes.append(name)
 
 
 def invalid(action):
@@ -162,3 +170,83 @@ def test_initial_rollback_restores_none(tmp_path):
     s.rollback_current_switch()
     s.rollback_current_switch()
     assert s.read_current() is None
+
+
+@pytest.mark.parametrize("stop", range(5))
+@pytest.mark.parametrize("retry", ["finalize", "rollback"])
+def test_finalize_cleanup_failure_keeps_committed_target_and_retries(
+    tmp_path, stop, retry
+):
+    b = Backend()
+    s = WindowsDataLocationStore(b)
+    first, second = ref(tmp_path, "first"), ref(tmp_path, "second")
+    s.begin_current_switch(first)
+    s.finalize_current_switch()
+    s.begin_current_switch(second)
+    b.deletes.clear()
+    b.fail_delete_after = stop
+
+    with pytest.raises(OSError, match="interrupted delete"):
+        s.finalize_current_switch()
+
+    assert s.read_current() == second
+    assert b.values["CurrentSwitchCommitted"] == (1, REG_DWORD)
+    b.fail_delete_after = None
+    if retry == "finalize":
+        s.finalize_current_switch()
+        s.finalize_current_switch()
+    else:
+        s.rollback_current_switch()
+        s.rollback_current_switch()
+    assert s.read_current() == second
+    assert not any(name.startswith("PreviousDataRoot") for name in b.values)
+    assert "CurrentSwitchCommitted" not in b.values
+
+
+@pytest.mark.parametrize("stop", range(6))
+def test_rollback_clears_interrupted_begin_residue(tmp_path, stop):
+    b = Backend()
+    s = WindowsDataLocationStore(b)
+    first = ref(tmp_path, "first")
+    s.begin_current_switch(first)
+    s.finalize_current_switch()
+    b.writes.clear()
+    b.fail_after = stop
+    with pytest.raises(OSError, match="interrupted"):
+        s.begin_current_switch(ref(tmp_path, "second"))
+    b.fail_after = None
+
+    s.rollback_current_switch()
+    s.rollback_current_switch()
+
+    assert s.read_current() == first
+    assert not any(name.startswith("PreviousDataRoot") for name in b.values)
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("PreviousDataRootAbsent", True),
+        ("CurrentSwitchCommitted", True),
+    ],
+)
+def test_switch_markers_reject_bool_reg_dword(tmp_path, name, value):
+    b = Backend()
+    s = WindowsDataLocationStore(b)
+    current = ref(tmp_path, "current")
+    b.values.update(
+        {
+            DATA_ROOT: (str(current.root), REG_SZ),
+            DATA_ROOT_ID: (current.root_id, REG_SZ),
+            DATA_ROOT_SCHEMA: (1, REG_DWORD),
+            name: (value, REG_DWORD),
+        }
+    )
+    invalid(s.read_current)
+
+
+def test_pending_recovery_rejects_bool_reg_dword(tmp_path):
+    b = Backend()
+    b.values[PENDING_MIGRATION_TARGET] = (str(tmp_path / "selected"), REG_SZ)
+    b.values["PendingMigrationCreateRecovery"] = (True, REG_DWORD)
+    invalid(WindowsDataLocationStore(b).read_pending_migration)
