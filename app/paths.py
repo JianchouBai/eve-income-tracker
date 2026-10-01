@@ -25,6 +25,7 @@ class ConfigurationError(ValueError):
 @dataclass(frozen=True)
 class AppPaths:
     resource_root: Path
+    data_root: Path
     data_dir: Path
     config_dir: Path
     logs_dir: Path
@@ -63,13 +64,9 @@ def resolve_app_paths(
     frozen: bool,
     local_app_data: Path | None = None,
     bundle_root: Path | None = None,
+    data_root: Path | None = None,
 ) -> AppPaths:
     if frozen:
-        if local_app_data is None:
-            raw_local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
-            if not raw_local_app_data:
-                raise ConfigurationError("LOCALAPPDATA is unavailable")
-            local_app_data = Path(raw_local_app_data)
         if bundle_root is None:
             frozen_root = getattr(sys, "_MEIPASS", None)
             bundle_root = (
@@ -77,7 +74,15 @@ def resolve_app_paths(
                 if frozen_root is not None
                 else Path(sys.executable).resolve().parent
             )
-        private_root = local_app_data / APP_DATA_DIRECTORY
+        if data_root is None:
+            if local_app_data is None:
+                raw_local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+                if not raw_local_app_data:
+                    raise ConfigurationError("LOCALAPPDATA is unavailable")
+                local_app_data = Path(raw_local_app_data)
+            private_root = local_app_data / APP_DATA_DIRECTORY
+        else:
+            private_root = data_root.resolve()
     else:
         bundle_root = bundle_root or PROJECT_ROOT
         private_root = bundle_root
@@ -86,6 +91,7 @@ def resolve_app_paths(
     config_dir = private_root / "config"
     return AppPaths(
         resource_root=bundle_root,
+        data_root=private_root,
         data_dir=data_dir,
         config_dir=config_dir,
         logs_dir=private_root / "logs",

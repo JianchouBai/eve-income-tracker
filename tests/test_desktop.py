@@ -133,6 +133,7 @@ def fake_paths(tmp_path):
     resources = tmp_path / "resources"
     return AppPaths(
         resource_root=resources,
+        data_root=root,
         data_dir=root / "data",
         config_dir=root / "config",
         logs_dir=root / "logs",

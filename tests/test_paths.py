@@ -30,6 +30,7 @@ def test_development_paths_use_explicit_root_without_creating_directories(tmp_pa
     resolved = paths.resolve_app_paths(frozen=False, bundle_root=project)
 
     assert resolved.resource_root == project
+    assert resolved.data_root == project
     assert resolved.data_dir == project / "data"
     assert resolved.database_path == project / "data" / "eve_income.sqlite3"
     assert resolved.config_dir == project / "config"
@@ -53,6 +54,7 @@ def test_frozen_paths_match_documented_local_app_data_layout(tmp_path):
 
     root = local_app_data / "EVE Income Tracker"
     assert resolved.resource_root == bundle
+    assert resolved.data_root == root
     assert resolved.data_dir == root / "data"
     assert resolved.database_path == root / "data" / "eve_income.sqlite3"
     assert resolved.config_dir == root / "config"
@@ -79,6 +81,42 @@ def test_two_windows_users_never_share_private_paths(tmp_path):
     assert first.key_path != second.key_path
     assert first.logs_dir != second.logs_dir
     assert first.backups_dir != second.backups_dir
+
+
+def test_frozen_paths_use_explicit_data_root_for_all_private_files(tmp_path):
+    paths = paths_module()
+    bundle = tmp_path / "program"
+    root = tmp_path / "other drive" / "EVE Income Tracker"
+    resolved = paths.resolve_app_paths(
+        frozen=True,
+        local_app_data=tmp_path / "unused local data",
+        bundle_root=bundle,
+        data_root=root,
+    )
+    assert resolved.resource_root == bundle
+    assert resolved.data_root == root.resolve()
+    assert resolved.data_dir == root / "data"
+    assert resolved.database_path == root / "data" / "eve_income.sqlite3"
+    assert resolved.config_dir == root / "config"
+    assert resolved.key_path == root / "config" / "local.key"
+    assert resolved.webview_storage_dir == root / "config" / "webview"
+    assert resolved.logs_dir == root / "logs"
+    assert resolved.backups_dir == root / "backups"
+    assert not root.exists()
+
+
+def test_development_paths_ignore_explicit_data_root(tmp_path):
+    paths = paths_module()
+    project = tmp_path / "project"
+
+    resolved = paths.resolve_app_paths(
+        frozen=False,
+        bundle_root=project,
+        data_root=tmp_path / "other drive" / "EVE Income Tracker",
+    )
+
+    assert resolved.data_root == project
+    assert resolved.database_path == project / "data" / "eve_income.sqlite3"
 
 
 def test_release_config_accepts_only_four_public_fields(tmp_path):
