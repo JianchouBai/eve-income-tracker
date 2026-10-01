@@ -169,7 +169,6 @@ class RecoverySnapshotService:
             ValueError,
             RuntimeError,
             NotImplementedError,
-            TypeError,
             zlib.error,
         ):
             raise RecoverySnapshotError("snapshot_invalid") from None

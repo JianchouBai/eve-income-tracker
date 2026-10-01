@@ -274,3 +274,18 @@ def test_stale_sweep_removes_only_regular_service_temp_files(tmp_path):
     if link is not None:
         assert link.is_symlink()
     assert service.sweep_stale_temps(destination) == 0
+
+
+def test_unexpected_validator_type_error_is_not_disguised_as_corruption(
+    tmp_path, monkeypatch
+):
+    source, destination = fixture_paths(tmp_path)
+    service = RecoverySnapshotService(clock=lambda: NOW)
+    service.create(source, destination)
+
+    def programming_error(_archive, _name):
+        raise TypeError("unexpected validator defect")
+
+    monkeypatch.setattr(migration_recovery, "_member_hash", programming_error)
+    with pytest.raises(TypeError, match="unexpected validator defect"):
+        service.inspect(destination)
