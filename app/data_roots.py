@@ -154,10 +154,48 @@ def write_data_root_marker(root: Path, marker: DataRootMarker) -> None:
     _validate_marker(canonical_root, marker)
     if not canonical_root.is_dir():
         raise DataRootValidationError("path_unavailable")
+    _write_data_root_marker_at(canonical_root, marker)
+
+
+def write_staged_data_root_marker(staging: Path, marker: DataRootMarker) -> None:
+    """Bind a private sibling staging marker to its eventual formal root."""
+    _reject_reparse_components(staging)
+    directory = _canonical(staging, reject_traversal=True)
+    root = _validate_reference(marker.reference)
+    _reject_unsafe_root(root)
+    prefix = ".eve-income-tracker-migrating-"
+    suffix = directory.name.removeprefix(prefix)
+    try:
+        migration_id = UUID(suffix)
+    except (ValueError, AttributeError):
+        raise DataRootValidationError("path_unsafe") from None
+    if (
+        directory == root
+        or directory.parent != root.parent
+        or not directory.name.startswith(prefix)
+        or migration_id.version != 4
+        or suffix not in (migration_id.hex, str(migration_id))
+        or directory.parent == Path.home().resolve(strict=False)
+        or directory == Path.home().resolve(strict=False)
+        or any(
+            _inside(directory, protected) or _inside(protected, directory)
+            for protected in _protected_directories()
+        )
+    ):
+        raise DataRootValidationError("path_unsafe")
+    _validate_marker(root, marker)
+    if not directory.is_dir():
+        raise DataRootValidationError("path_unavailable")
+    _write_data_root_marker_at(directory, marker)
+    if _read_data_root_marker_at(directory, root) != marker:
+        raise DataRootValidationError("marker_mismatch")
+
+
+def _write_data_root_marker_at(directory: Path, marker: DataRootMarker) -> None:
     payload = {
         "app_id": APP_ID,
         "created_at": marker.created_at,
-        "root": str(canonical_root),
+        "root": str(_canonical(marker.reference.root, reject_traversal=True)),
         "root_id": marker.reference.root_id,
         "schema": marker.reference.schema,
         "state": marker.state,
@@ -169,13 +207,13 @@ def write_data_root_marker(root: Path, marker: DataRootMarker) -> None:
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            dir=canonical_root, prefix=f"{MARKER_NAME}.", suffix=".tmp", delete=False
+            dir=directory, prefix=f"{MARKER_NAME}.", suffix=".tmp", delete=False
         ) as stream:
             temporary = Path(stream.name)
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, canonical_root / MARKER_NAME)
+        os.replace(temporary, directory / MARKER_NAME)
     except OSError:
         raise DataRootValidationError("marker_write_failed") from None
     finally:
@@ -337,4 +375,15 @@ def remove_owned_data_root(reference: DataRootReference) -> None:
     try:
         _delete_quarantined_tree(quarantine, identity)
     except OSError:
+        try:
+            _reject_reparse_components(quarantine)
+            if _directory_identity(quarantine) != identity:
+                raise DataRootValidationError("remove_restore_failed")
+            _reject_reparse_tree(quarantine)
+            _write_data_root_marker_at(quarantine, marker)
+            if _read_data_root_marker_at(quarantine, root) != marker:
+                raise DataRootValidationError("remove_restore_failed")
+            _restore_quarantined_root(quarantine, root)
+        except (OSError, DataRootValidationError):
+            raise DataRootValidationError("remove_restore_failed") from None
         raise DataRootValidationError("remove_failed") from None

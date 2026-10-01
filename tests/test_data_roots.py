@@ -380,7 +380,7 @@ def test_remove_owned_root_keeps_quarantine_when_restore_path_is_occupied(
     assert (moved_original / ".eve-income-tracker-data.json").exists()
 
 
-def test_remove_owned_root_keeps_quarantine_when_delete_fails(tmp_path, monkeypatch):
+def test_remove_owned_root_restores_exact_root_when_delete_fails(tmp_path, monkeypatch):
     root = tmp_path / "EVE Income Tracker"
     root.mkdir()
     marker = marker_for(root)
@@ -398,10 +398,10 @@ def test_remove_owned_root_keeps_quarantine_when_delete_fails(tmp_path, monkeypa
         remove_owned_data_root(marker.reference)
 
     assert caught.value.code == "remove_failed"
-    assert not root.exists()
-    quarantines = list(tmp_path.glob(".eve-income-tracker-removing-*"))
-    assert len(quarantines) == 1
-    assert (quarantines[0] / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert root.exists()
+    assert read_data_root_marker(root) == marker
+    assert not list(tmp_path.glob(".eve-income-tracker-removing-*"))
+    assert (root / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_remove_owned_root_rejects_swap_at_final_deletion_boundary(
@@ -504,3 +504,74 @@ def test_remove_owned_root_rejects_nested_symlink_and_preserves_all_files(tmp_pa
 
     assert private.read_text(encoding="utf-8") == "keep"
     assert root.exists()
+
+
+@pytest.mark.parametrize("state", ["incomplete", "ready"])
+def test_staged_marker_becomes_valid_at_final_path_on_rename(tmp_path, state):
+    root = tmp_path / "EVE Income Tracker"
+    staging = tmp_path / f".eve-income-tracker-migrating-{uuid4().hex}"
+    staging.mkdir()
+    marker = marker_for(root, state)
+    data_roots.write_staged_data_root_marker(staging, marker)
+    payload = json.loads((staging / ".eve-income-tracker-data.json").read_text())
+    assert payload["root"] == str(root)
+    assert payload["state"] == state
+    os.rename(staging, root)
+    assert read_data_root_marker(root) == marker
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["name", "uuid", "sibling", "same", "final-name", "dangerous", "staging-protected"],
+)
+def test_staged_marker_rejects_unowned_paths_before_write(
+    tmp_path, monkeypatch, invalid
+):
+    root = tmp_path / "EVE Income Tracker"
+    staging = tmp_path / f".eve-income-tracker-migrating-{uuid4().hex}"
+    if invalid == "name":
+        staging = tmp_path / "ordinary"
+    elif invalid == "uuid":
+        staging = tmp_path / ".eve-income-tracker-migrating-invalid"
+    elif invalid == "sibling":
+        staging = tmp_path / "other" / staging.name
+    elif invalid == "same":
+        staging = root
+    elif invalid == "final-name":
+        root = tmp_path / "ordinary-final"
+    elif invalid == "dangerous":
+        monkeypatch.setattr(data_roots, "PROJECT_ROOT", tmp_path)
+    if invalid == "staging-protected":
+        monkeypatch.setattr(data_roots, "PROJECT_ROOT", staging)
+    staging.mkdir(parents=True)
+    with pytest.raises(DataRootValidationError):
+        data_roots.write_staged_data_root_marker(staging, marker_for(root))
+    assert list(staging.iterdir()) == []
+
+
+def test_partial_delete_failure_restores_marker_and_exact_root_for_retry(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    marker = marker_for(root)
+    write_data_root_marker(root, marker)
+    (root / "gone").write_bytes(b"gone")
+    (root / "remaining").write_bytes(b"keep")
+    real_delete = data_roots._delete_quarantined_tree
+
+    def partial_delete(path, identity):
+        (path / ".eve-income-tracker-data.json").unlink()
+        (path / "gone").unlink()
+        raise OSError("occupied file")
+
+    monkeypatch.setattr(data_roots, "_delete_quarantined_tree", partial_delete)
+    with pytest.raises(DataRootValidationError) as caught:
+        remove_owned_data_root(marker.reference)
+    assert caught.value.code == "remove_failed"
+    assert read_data_root_marker(root) == marker
+    assert (root / "remaining").read_bytes() == b"keep"
+    assert not list(tmp_path.glob(".eve-income-tracker-removing-*"))
+    monkeypatch.setattr(data_roots, "_delete_quarantined_tree", real_delete)
+    remove_owned_data_root(marker.reference)
+    assert not root.exists()
