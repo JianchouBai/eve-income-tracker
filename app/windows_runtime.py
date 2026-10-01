@@ -5,7 +5,7 @@ import os
 import platform
 import re
 from pathlib import Path
-from typing import Protocol, Self
+from typing import ClassVar, Protocol, Self
 
 APP_TITLE = "EVE 收益追踪器"
 MUTEX_NAME = r"Local\EVEIncomeTracker.SingleInstance"
@@ -282,3 +282,350 @@ def choose_legacy_database(
     if not path.is_file():
         raise WindowsRuntimeError("legacy_database_invalid")
     return path
+
+
+class FolderDialogAdapter(Protocol):
+    def choose_folder(self, title: str) -> str | None: ...
+
+    def choose_option(
+        self, title: str, message: str, options: tuple[tuple[int, str], ...]
+    ) -> int: ...
+
+
+class ProgressDialogAdapter(Protocol):
+    def show_progress(self, title: str, message: str) -> None: ...
+
+    def close_progress(self) -> None: ...
+
+
+class _BrowseInfo(ctypes.Structure):
+    _fields_ = [
+        ("hwndOwner", ctypes.c_void_p),
+        ("pidlRoot", ctypes.c_void_p),
+        ("pszDisplayName", ctypes.c_wchar_p),
+        ("lpszTitle", ctypes.c_wchar_p),
+        ("ulFlags", ctypes.c_uint),
+        ("lpfn", ctypes.c_void_p),
+        ("lParam", ctypes.c_ssize_t),
+        ("iImage", ctypes.c_int),
+    ]
+
+
+class _TaskDialogButton(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [("nButtonID", ctypes.c_int), ("pszButtonText", ctypes.c_wchar_p)]
+
+
+class _TaskDialogConfig(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("hwndParent", ctypes.c_void_p),
+        ("hInstance", ctypes.c_void_p),
+        ("dwFlags", ctypes.c_uint),
+        ("dwCommonButtons", ctypes.c_uint),
+        ("pszWindowTitle", ctypes.c_wchar_p),
+        ("pszMainIcon", ctypes.c_void_p),
+        ("pszMainInstruction", ctypes.c_wchar_p),
+        ("pszContent", ctypes.c_wchar_p),
+        ("cButtons", ctypes.c_uint),
+        ("pButtons", ctypes.POINTER(_TaskDialogButton)),
+        ("nDefaultButton", ctypes.c_int),
+        ("cRadioButtons", ctypes.c_uint),
+        ("pRadioButtons", ctypes.c_void_p),
+        ("nDefaultRadioButton", ctypes.c_int),
+        ("pszVerificationText", ctypes.c_wchar_p),
+        ("pszExpandedInformation", ctypes.c_wchar_p),
+        ("pszExpandedControlText", ctypes.c_wchar_p),
+        ("pszCollapsedControlText", ctypes.c_wchar_p),
+        ("pszFooterIcon", ctypes.c_void_p),
+        ("pszFooter", ctypes.c_wchar_p),
+        ("pfCallback", ctypes.c_void_p),
+        ("lpCallbackData", ctypes.c_ssize_t),
+        ("cxWidth", ctypes.c_uint),
+    ]
+
+
+class _NativeLocationDialog:
+    """Small Win32 adapters; all handles stay local to the calling UI thread."""
+
+    def __init__(self) -> None:
+        if os.name != "nt":
+            raise WindowsRuntimeError("windows_required")
+        self._progress_window = None
+        self._progress_text = None
+
+    def choose_folder(self, title: str) -> str | None:
+        ole32 = ctypes.OleDLL("ole32")
+        ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        # STA is required by the shell folder browser.
+        ole32.CoInitializeEx(None, 2)
+        try:
+            shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+            shell32.SHBrowseForFolderW.argtypes = [ctypes.POINTER(_BrowseInfo)]
+            shell32.SHBrowseForFolderW.restype = ctypes.c_void_p
+            shell32.SHGetPathFromIDListEx.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_wchar_p,
+                ctypes.c_uint,
+                ctypes.c_uint,
+            ]
+            shell32.SHGetPathFromIDListEx.restype = ctypes.c_bool
+            ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+            ole32.CoTaskMemFree.restype = None
+            display = ctypes.create_unicode_buffer(32768)
+            request = _BrowseInfo()
+            request.pszDisplayName = ctypes.cast(display, ctypes.c_wchar_p)
+            request.lpszTitle = title
+            # Filesystem directories only, new dialog style, no new-folder button.
+            request.ulFlags = 0x0001 | 0x0040 | 0x0200
+            item = shell32.SHBrowseForFolderW(ctypes.byref(request))
+            if not item:
+                return None
+            try:
+                path = ctypes.create_unicode_buffer(32768)
+                if not shell32.SHGetPathFromIDListEx(item, path, len(path), 0):
+                    raise WindowsRuntimeError("folder_dialog_failed")
+                return path.value
+            finally:
+                ole32.CoTaskMemFree(item)
+        finally:
+            ole32.CoUninitialize()
+
+    def choose_option(
+        self, title: str, message: str, options: tuple[tuple[int, str], ...]
+    ) -> int:
+        controls = ctypes.WinDLL("comctl32", use_last_error=True)
+        task_dialog = controls.TaskDialogIndirect
+        task_dialog.argtypes = [
+            ctypes.POINTER(_TaskDialogConfig),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        task_dialog.restype = ctypes.c_long
+        buttons = (_TaskDialogButton * len(options))(
+            *(_TaskDialogButton(number, label) for number, label in options)
+        )
+        config = _TaskDialogConfig()
+        config.cbSize = ctypes.sizeof(config)
+        config.dwFlags = 0x0008  # Allow window close/Escape cancellation.
+        config.pszWindowTitle = title
+        config.pszContent = message
+        config.cButtons = len(options)
+        config.pButtons = buttons
+        config.nDefaultButton = options[0][0]
+        selected = ctypes.c_int()
+        if task_dialog(ctypes.byref(config), ctypes.byref(selected), None, None) < 0:
+            raise WindowsRuntimeError("location_dialog_failed")
+        return selected.value
+
+    def _progress_api(self):
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.CreateWindowExW.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        user32.CreateWindowExW.restype = ctypes.c_void_p
+        user32.SetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        user32.SetWindowTextW.restype = ctypes.c_bool
+        user32.UpdateWindow.argtypes = [ctypes.c_void_p]
+        user32.UpdateWindow.restype = ctypes.c_bool
+        user32.DestroyWindow.argtypes = [ctypes.c_void_p]
+        user32.DestroyWindow.restype = ctypes.c_bool
+        return user32
+
+    def show_progress(self, title: str, message: str) -> None:
+        user32 = self._progress_api()
+        if self._progress_window is None:
+            # A noninteractive native captioned window; no close button while
+            # the transaction is running. The desktop calls show at boundaries.
+            self._progress_window = user32.CreateWindowExW(
+                0x00000008,
+                "STATIC",
+                title,
+                0x10C00000,
+                160,
+                160,
+                520,
+                140,
+                None,
+                None,
+                None,
+                None,
+            )
+            if not self._progress_window:
+                self._progress_window = None
+                raise WindowsRuntimeError("progress_failed")
+            self._progress_text = user32.CreateWindowExW(
+                0,
+                "STATIC",
+                message,
+                0x50000000,
+                24,
+                30,
+                460,
+                48,
+                self._progress_window,
+                None,
+                None,
+                None,
+            )
+            if not self._progress_text:
+                self.close_progress()
+                raise WindowsRuntimeError("progress_failed")
+        if not user32.SetWindowTextW(self._progress_text, message):
+            raise WindowsRuntimeError("progress_failed")
+        user32.UpdateWindow(self._progress_window)
+        user32.UpdateWindow(self._progress_text)
+
+    def close_progress(self) -> None:
+        window, self._progress_window = self._progress_window, None
+        self._progress_text = None
+        if window and not self._progress_api().DestroyWindow(window):
+            raise WindowsRuntimeError("progress_failed")
+
+
+def _pick_folder(title: str, dialog: FolderDialogAdapter | None) -> Path | None:
+    try:
+        selected = (dialog or _NativeLocationDialog()).choose_folder(title)
+        if selected is None or selected == "":
+            return None
+        if not isinstance(selected, str) or "\0" in selected:
+            raise WindowsRuntimeError("folder_dialog_failed")
+        path = Path(selected)
+        if not path.is_absolute():
+            raise WindowsRuntimeError("folder_dialog_failed")
+        # Do not resolve links here: the validator must see any reparse component.
+        return path
+    except WindowsRuntimeError:
+        raise
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        raise WindowsRuntimeError("folder_dialog_failed") from None
+
+
+def choose_data_parent(*, dialog: FolderDialogAdapter | None = None) -> Path | None:
+    return _pick_folder("选择数据存储的父目录", dialog)
+
+
+def choose_existing_data_root(
+    *, dialog: FolderDialogAdapter | None = None
+) -> Path | None:
+    return _pick_folder("定位已有 EVE 收益数据目录", dialog)
+
+
+def _location_choice(message, options, dialog):
+    try:
+        result = (dialog or _NativeLocationDialog()).choose_option(
+            APP_TITLE, message, options
+        )
+        if result not in {2, *(number for number, _ in options)}:
+            raise WindowsRuntimeError("location_dialog_failed")
+        return result
+    except WindowsRuntimeError:
+        raise
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        raise WindowsRuntimeError("location_dialog_failed") from None
+
+
+def ask_retry_locate_exit(*, dialog: FolderDialogAdapter | None = None) -> str:
+    result = _location_choice(
+        "数据目录不可用或校验失败。请连接数据盘后重试，或定位已有数据目录。",
+        ((101, "重试"), (102, "定位已有数据目录"), (103, "退出")),
+        dialog,
+    )
+    return {101: "retry", 102: "locate", 103: "exit", 2: "exit"}[result]
+
+
+class NativeStartupInteraction:
+    def __init__(self, *, dialog: FolderDialogAdapter | None = None) -> None:
+        self._dialog = dialog
+
+    def choose_initial_location(self, default_root: Path) -> str:
+        result = _location_choice(
+            f"选择数据存储位置。默认目录：\n{default_root}",
+            ((101, "使用默认位置"), (102, "选择自定义位置"), (103, "退出")),
+            self._dialog,
+        )
+        return {101: "default", 102: "custom", 103: "exit", 2: "exit"}[result]
+
+    def choose_legacy_action(self, root: Path) -> str:
+        result = _location_choice(
+            f"发现已有数据：\n{root}\n可以保留原位置或迁移到其他位置。",
+            ((101, "保留原位置"), (102, "迁移到新位置"), (103, "退出")),
+            self._dialog,
+        )
+        return {101: "keep", 102: "migrate", 103: "exit", 2: "exit"}[result]
+
+    def choose_data_parent(self) -> Path | None:
+        return choose_data_parent(dialog=self._dialog)
+
+    def choose_existing_data_root(self) -> Path | None:
+        return choose_existing_data_root(dialog=self._dialog)
+
+    def ask_retry_locate_exit(self, code: str) -> str:
+        return ask_retry_locate_exit(dialog=self._dialog)
+
+    def confirm_location(self, root: Path, estimate=None) -> bool:
+        message = f"将使用以下完整数据目录：\n{root}"
+        if estimate is not None:
+            message += (
+                f"\n迁移预计占用：{estimate.copy_bytes:,} 字节"
+                f"\n恢复副本预计占用：{estimate.recovery_bytes:,} 字节"
+                f"\n目标可用空间：{estimate.free_bytes:,} 字节"
+                "\n迁移验证成功后清理原数据目录。默认创建一份迁移恢复副本。"
+            )
+        return (
+            _location_choice(message, ((101, "确认"), (102, "取消")), self._dialog)
+            == 101
+        )
+
+
+class MigrationProgress:
+    STAGES: ClassVar[dict[str, str]] = {
+        "preparing": "正在准备数据迁移…",
+        "copying": "正在复制数据…",
+        "validating": "正在验证数据库和密钥…",
+        "switching": "正在切换数据位置…",
+        "cleaning": "正在清理原数据目录…",
+        "complete": "数据迁移完成。",
+    }
+
+    def __init__(self, *, dialog: ProgressDialogAdapter | None = None) -> None:
+        self._dialog = dialog
+        self._closed = False
+
+    def show(self, stage: str) -> None:
+        if self._closed:
+            raise WindowsRuntimeError("progress_closed")
+        if stage not in self.STAGES:
+            raise WindowsRuntimeError("progress_stage_invalid")
+        try:
+            if self._dialog is None:
+                self._dialog = _NativeLocationDialog()
+            self._dialog.show_progress(APP_TITLE, self.STAGES[stage])
+        except WindowsRuntimeError:
+            raise
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            raise WindowsRuntimeError("progress_failed") from None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self._dialog is not None:
+                self._dialog.close_progress()
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            raise WindowsRuntimeError("progress_failed") from None
