@@ -42,8 +42,8 @@ def test_installer_upgrade_and_uninstall_preserve_data_by_default():
     assert "[uninstalldelete]" not in lowered
     assert "UninstallSilent" in script
     assert "DeleteUserData := False" in script
-    assert "usPostUninstall" in script
-    assert "DelTree(UserDataRoot, True, True, True)" in script
+    assert "usUninstall" in script
+    assert "DelTree(UserDataRoot" not in script
     assert "默认保留钱包数据库、授权密钥、日志和备份" in script
     assert "确认永久删除以下完整目录" in script
     assert "RegWrite" not in script
@@ -80,20 +80,55 @@ def test_explicit_uninstall_requires_complete_current_registry_and_marker():
     assert "Pos('root_id'" not in script
 
 
-def test_uninstall_deletes_only_verified_root_and_keeps_registry_on_failure():
-    script = read(ISS)
+def assert_uninstall_delete_call_chain(script: str) -> None:
+    validate = _inno_function(script, "ValidateDeleteTarget")
+    initialize = _inno_function(script, "InitializeUninstall")
     uninstall = script.split("procedure CurUninstallStepChanged", 1)[1]
 
-    assert "ValidateDeleteTarget(UserDataRoot" in uninstall
-    assert "if DelTree(UserDataRoot, True, True, True) then" in uninstall
-    assert "RegDeleteKeyIfEmpty" in uninstall
+    assert "ReadDeleteTarget(CurrentRoot, CurrentId)" in validate
+    assert "IsSafeDataRoot(CurrentRoot)" in validate
+    assert "IsCanonicalMarker(CurrentRoot, CurrentId)" in validate
+    assert "ValidateDeleteTarget(UserDataRoot, UserDataId)" in initialize
+    assert "ValidateDeleteTarget(UserDataRoot, UserDataId)" in uninstall
+    assert "CurUninstallStep <> usUninstall" in uninstall
+    assert "Exec(" in uninstall
+    assert "--uninstall-delete-data" in uninstall
+    assert "ewWaitUntilTerminated" in uninstall
+    assert "ResultCode = 0" in uninstall
+    assert "not DirExists(UserDataRoot)" in uninstall
+    assert "DelTree(UserDataRoot" not in script
     assert uninstall.index("ValidateDeleteTarget(UserDataRoot") < uninstall.index(
-        "DelTree(UserDataRoot, True, True, True)"
+        "Exec("
     )
-    assert uninstall.index("DelTree(UserDataRoot, True, True, True)") < uninstall.index(
-        "RegDeleteKeyIfEmpty"
+    assert uninstall.index("Exec(") < uninstall.index("RegDeleteValue")
+    assert uninstall.index("not DirExists(UserDataRoot)") < uninstall.index(
+        "RegDeleteValue"
     )
-    assert r"{localappdata}\EVE Income Tracker" not in uninstall
+
+
+def test_uninstall_delete_call_chain_uses_marker_and_early_bound_helper():
+    assert_uninstall_delete_call_chain(read(ISS))
+
+
+@pytest.mark.parametrize(
+    "removed",
+    [
+        "IsCanonicalMarker(CurrentRoot, CurrentId)",
+        "Exec(",
+    ],
+)
+def test_uninstall_call_chain_test_detects_removed_security_step(removed):
+    script = read(ISS)
+    assert removed in script
+    with pytest.raises(AssertionError):
+        if removed == "Exec(":
+            prefix, uninstall = script.split("procedure CurUninstallStepChanged", 1)
+            script = prefix + "procedure CurUninstallStepChanged" + uninstall.replace(
+                removed, "REMOVED(", 1
+            )
+        else:
+            script = script.replace(removed, "REMOVED(", 1)
+        assert_uninstall_delete_call_chain(script)
 
 def _inno_function(script: str, name: str) -> str:
     body = script.split(f"function {name}", 1)[1]

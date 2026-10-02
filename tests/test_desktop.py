@@ -705,6 +705,33 @@ def test_desktop_settings_are_explicit_and_ignore_environment_values(
 @pytest.mark.skipif(
     __import__("os").name != "nt", reason="desktop entry targets Windows"
 )
+def test_uninstall_cli_dispatches_cleanup_without_desktop_start(tmp_path, monkeypatch):
+    from app import desktop
+
+    calls = []
+
+    def cleanup(root, root_id):
+        calls.append((root, root_id))
+        return 0
+
+    def forbidden_desktop(**kwargs):
+        pytest.fail("uninstall CLI must not start the desktop application")
+
+    monkeypatch.setattr(desktop, "cleanup_uninstall_data", cleanup, raising=False)
+    monkeypatch.setattr(desktop, "DesktopApplication", forbidden_desktop)
+    root = str(tmp_path / "EVE Income Tracker")
+    root_id = "01234567-89ab-4cde-8abc-0123456789ab"
+    try:
+        result = main(["--uninstall-delete-data", root, root_id])
+    except SystemExit as error:
+        result = error.code
+
+    assert result == 0
+    assert calls == [(root, root_id)]
+
+@pytest.mark.skipif(
+    __import__("os").name != "nt", reason="desktop entry targets Windows"
+)
 def test_source_smoke_uses_only_temporary_local_app_data(tmp_path, capsys):
     result = main(["--smoke-test", "--local-app-data", str(tmp_path)])
 

@@ -43,6 +43,7 @@ from app.paths import (
 )
 from app.security import validate_fernet_key
 from app.storage import LATEST_SCHEMA_VERSION, Database
+from app.uninstall_cleanup import cleanup_uninstall_data
 from app.web import RuntimeContext
 from app.windows_runtime import (
     APP_TITLE,
@@ -694,11 +695,22 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="覆盖 LocalAppData 根目录（仅用于测试）",
     )
+    parser.add_argument(
+        "--uninstall-delete-data",
+        nargs=2,
+        metavar=("ROOT", "ROOT_ID"),
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if arguments.uninstall_delete_data is not None:
+        if arguments.smoke_test or arguments.local_app_data is not None:
+            return 2
+        root, root_id = arguments.uninstall_delete_data
+        return cleanup_uninstall_data(root, root_id)
     if arguments.smoke_test and arguments.local_app_data is None:
         with tempfile.TemporaryDirectory(
             prefix="eve-income-desktop-smoke-"

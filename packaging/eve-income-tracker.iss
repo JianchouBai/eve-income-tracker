@@ -422,8 +422,10 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
 begin
-  if (CurUninstallStep <> usPostUninstall) or (not DeleteUserData) then
+  if (CurUninstallStep <> usUninstall) or (not DeleteUserData) then
     Exit;
   if not ValidateDeleteTarget(UserDataRoot, UserDataId) then
   begin
@@ -432,18 +434,23 @@ begin
       UserDataRoot, mbError, MB_OK);
     Exit;
   end;
-  if DelTree(UserDataRoot, True, True, True) then
+  ResultCode := -1;
+  if Exec(
+    ExpandConstant('{app}\{#MyAppExeName}'),
+    '--uninstall-delete-data ' + AddQuotes(UserDataRoot) + ' ' + UserDataId,
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  ) and (ResultCode = 0) and (not DirExists(UserDataRoot)) then
   begin
-    if not DirExists(UserDataRoot) then
-    begin
-      if RegDeleteValue(HKCU, DataLocationKey, 'DataRoot') and
-        RegDeleteValue(HKCU, DataLocationKey, 'DataRootId') and
-        RegDeleteValue(HKCU, DataLocationKey, 'DataRootSchema') then
-        RegDeleteKeyIfEmpty(HKCU, DataLocationKey)
-      else
-        Log('Data removed, but location registry values could not be cleared.');
-      Exit;
-    end;
+    if RegDeleteValue(HKCU, DataLocationKey, 'DataRoot') and
+      RegDeleteValue(HKCU, DataLocationKey, 'DataRootId') and
+      RegDeleteValue(HKCU, DataLocationKey, 'DataRootSchema') then
+      RegDeleteKeyIfEmpty(HKCU, DataLocationKey)
+    else
+      Log('Data removed, but location registry values could not be cleared.');
+    Exit;
   end;
   Log('Data directory was not fully removed: ' + UserDataRoot);
   MsgBox('个人数据目录未能完全删除，位置记录已保留，请稍后手动处理：' +
