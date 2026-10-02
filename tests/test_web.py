@@ -1484,6 +1484,7 @@ from app.migration_recovery import RecoverySnapshotInfo
 class SettingsLocationFake:
     def __init__(self):
         self.pending = None
+        self.cleanup = None
         self.failure = None
         self.free = 200000
         self.calls = []
@@ -1509,6 +1510,7 @@ class SettingsLocationFake:
             },
             self.recovery,
             pending_migration=self.pending,
+            pending_cleanup=self.cleanup,
         )
 
     def estimate(self, parent, *, create_recovery=True):
@@ -1622,6 +1624,7 @@ def test_storage_status_estimate_schedule_and_idempotent_delete(storage_context)
             },
             "pending_migration": False,
             "pending_cleanup": False,
+            "pending_cleanup_path": None,
             "busy": False,
         }
         assert "private-" not in response.text
@@ -1795,3 +1798,111 @@ def test_storage_delete_rejects_payload_and_pending_migration(storage_context):
         response = client.delete("/api/desktop/data-location/recovery", headers=headers)
         assert response.status_code == 409
         assert runtime.data_location.recovery is not None
+
+
+def test_storage_status_exposes_only_leftover_cleanup_path(storage_context):
+    from app.data_location_store import PendingCleanup
+    from app.data_roots import DataRootReference
+
+    settings, services, clock, runtime = storage_context
+    runtime.data_location.cleanup = PendingCleanup(
+        DataRootReference(Path("F:/Old/EVE Income Tracker"), "private-root-id", 1)
+    )
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        response = client.get("/api/desktop/data-location")
+        assert response.status_code == 200
+        assert response.json()["pending_cleanup"] is True
+        assert response.json()["pending_cleanup_path"] == str(
+            Path("F:/Old/EVE Income Tracker")
+        )
+        assert "private-" not in response.text
+        assert "root_id" not in response.text
+        runtime.data_location.cleanup = None
+        response = client.get("/api/desktop/data-location")
+        assert response.json()["pending_cleanup"] is False
+        assert response.json()["pending_cleanup_path"] is None
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        ("status", "estimate"),
+        ("estimate", "delete_recovery"),
+        ("schedule_migration", "status"),
+        ("delete_recovery", "schedule_migration"),
+    ],
+)
+def test_storage_work_is_offloaded_and_serialized_without_blocking_health(
+    storage_context, first, second
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    settings, services, clock, runtime = storage_context
+    controller = runtime.data_location
+    entered, release, second_called, queued = Event(), Event(), Event(), Event()
+    original_first = getattr(controller, first)
+    original_second = getattr(controller, second)
+
+    def blocked(*args, **kwargs):
+        entered.set()
+        if not release.wait(10):
+            raise RuntimeError("test controller was never released")
+        return original_first(*args, **kwargs)
+
+    def observe_second(*args, **kwargs):
+        second_called.set()
+        return original_second(*args, **kwargs)
+
+    setattr(controller, first, blocked)
+    setattr(controller, second, observe_second)
+    app = create_app(settings, services, clock, runtime)
+
+    @app.middleware("http")
+    async def observe_queued_request(request, call_next):
+        if request.headers.get("X-Test-Queued"):
+            queued.set()
+        return await call_next(request)
+
+    routes = {
+        "status": ("GET", "/api/desktop/data-location"),
+        "estimate": ("POST", "/api/desktop/data-location/estimate"),
+        "schedule_migration": ("POST", "/api/desktop/data-location/migrations"),
+        "delete_recovery": ("DELETE", "/api/desktop/data-location/recovery"),
+    }
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=3) as executor:
+        launch_desktop(client, settings, runtime)
+        headers = csrf_headers(client, settings)
+
+        def invoke(operation, *, waiting=False):
+            method, path = routes[operation]
+            return client.request(
+                method,
+                path,
+                headers={**headers, **({"X-Test-Queued": "1"} if waiting else {})},
+                **(
+                    {"json": {"target_parent": "E:/", "create_recovery": True}}
+                    if method == "POST"
+                    else {}
+                ),
+            )
+
+        first_request = executor.submit(invoke, first)
+        second_request = None
+        try:
+            assert entered.wait(2), "storage controller never started"
+            health = executor.submit(client.get, "/healthz")
+            assert health.result(timeout=1).json() == {"status": "ok"}
+            assert not first_request.done()
+            second_request = executor.submit(invoke, second, waiting=True)
+            assert queued.wait(2), "second storage request never reached the app"
+            assert not second_called.wait(0.15), (
+                "storage controller operations overlapped"
+            )
+            assert not second_request.done(), "second storage operation did not wait"
+        finally:
+            release.set()
+        assert first_request.result(timeout=3).status_code in (200, 202)
+        assert second_request.result(timeout=3).status_code in (200, 202)
+        assert second_called.is_set()

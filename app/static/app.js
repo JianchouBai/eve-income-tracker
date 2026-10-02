@@ -649,6 +649,10 @@ function bindDataSettings() {
       $('storage-' + key).textContent = formatBytes(status.usage?.[key]);
     });
     $('storage-recovery-usage').textContent = formatBytes(status.usage?.recovery);
+    const cleanupPath = status.pending_cleanup && typeof status.pending_cleanup_path === 'string'
+      ? status.pending_cleanup_path : '';
+    $('storage-cleanup-path').textContent = cleanupPath;
+    $('storage-cleanup-notice').hidden = !cleanupPath;
     const recovery = status.recovery;
     $('storage-recovery-details').textContent = recovery
       ? `创建时间：${recovery.created_at}；实际大小：${formatBytes(recovery.size_bytes)}；成功启动：${recovery.successful_starts} 次。`

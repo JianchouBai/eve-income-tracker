@@ -499,8 +499,10 @@ def test_pending_cleanup_is_retried_before_noop_and_displayed(tmp_path):
     store.write_pending_cleanup(PendingCleanup(old))
     controller = make_controller(tmp_path, store)
     assert controller.status().pending_cleanup == PendingCleanup(old)
+    assert controller.status().pending_cleanup_path == old.root
     assert controller.execute_pending_migration() is None
     assert not old_paths.data_root.exists()
+    assert controller.status().pending_cleanup_path is None
     assert store.read_pending_cleanup() is None
     assert store.read_current() == current
 

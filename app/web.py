@@ -3,12 +3,12 @@ import logging
 import re
 import secrets
 import sqlite3
+from asyncio import Lock
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from threading import Lock
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, field_validator
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth_attempts import (
@@ -418,11 +419,17 @@ def create_app(
         except (ValueError, TypeError, UnicodeError, RecursionError):
             raise WebError(400, "invalid_request", "请求参数无效。") from None
 
+    async def storage_operation(operation, *args, **kwargs):
+        # One lock covers reads, estimates and mutations; native I/O never runs
+        # on the ASGI loop, and unrelated routes need not wait for this lock.
+        async with storage_lock:
+            return await run_in_threadpool(operation, *args, **kwargs)
+
     @app.get("/api/desktop/data-location")
     async def data_location_status(request: Request):
         controller = storage_controller(request)
         try:
-            status = controller.status()
+            status = await storage_operation(controller.status)
             recovery = status.recovery
             return {
                 "current_path": str(status.current_path),
@@ -451,6 +458,11 @@ def create_app(
                 },
                 "pending_migration": status.pending_migration is not None,
                 "pending_cleanup": status.pending_cleanup is not None,
+                "pending_cleanup_path": (
+                    str(status.pending_cleanup_path)
+                    if status.pending_cleanup_path is not None
+                    else None
+                ),
                 "busy": storage_lock.locked(),
             }
         except Exception as error:  # noqa: BLE001 - public filesystem boundary.
@@ -461,7 +473,9 @@ def create_app(
         controller = storage_controller(request, mutate=True)
         parent, recovery = await migration_payload(request)
         try:
-            estimate = controller.estimate(parent, create_recovery=recovery)
+            estimate = await storage_operation(
+                controller.estimate, parent, create_recovery=recovery
+            )
             return {
                 "target_path": str(estimate.target_root),
                 "copy_bytes": estimate.copy_bytes,
@@ -477,31 +491,29 @@ def create_app(
     async def schedule_data_location(request: Request):
         controller = storage_controller(request, mutate=True)
         parent, recovery = await migration_payload(request)
-        if not storage_lock.acquire(blocking=False):
-            raise WebError(409, "storage_busy", "数据存储操作正在进行，请稍后重试。")
         try:
-            estimate = controller.schedule_migration(parent, create_recovery=recovery)
+            estimate = await storage_operation(
+                controller.schedule_migration, parent, create_recovery=recovery
+            )
             return {"scheduled": True, "target_path": str(estimate.target_root)}
         except Exception as error:  # noqa: BLE001 - public filesystem boundary.
             storage_failure(error)
-        finally:
-            storage_lock.release()
 
     @app.delete("/api/desktop/data-location/recovery")
     async def delete_data_recovery(request: Request):
         controller = storage_controller(request, mutate=True)
         if await request.body():
             raise WebError(400, "invalid_request", "请求参数无效。")
-        if not storage_lock.acquire(blocking=False):
-            raise WebError(409, "storage_busy", "数据存储操作正在进行，请稍后重试。")
-        try:
+
+        def delete_if_available():
             if controller.status().pending_migration is not None:
                 raise DataLocationError("migration_pending")
-            return {"freed_bytes": controller.delete_recovery()}
+            return controller.delete_recovery()
+
+        try:
+            return {"freed_bytes": await storage_operation(delete_if_available)}
         except Exception as error:  # noqa: BLE001 - public filesystem boundary.
             storage_failure(error)
-        finally:
-            storage_lock.release()
 
     @app.get("/auth/login")
     async def login(request: Request):

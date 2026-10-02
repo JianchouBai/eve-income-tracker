@@ -71,6 +71,14 @@ class DataLocationStatus:
     pending_cleanup: PendingCleanup | None = None
     pending_migration: PendingMigration | None = None
 
+    @property
+    def pending_cleanup_path(self) -> Path | None:
+        return (
+            None
+            if self.pending_cleanup is None
+            else self.pending_cleanup.reference.root
+        )
+
 
 class StartupInteraction(Protocol):
     def choose_initial_location(self, default_root: Path) -> str: ...

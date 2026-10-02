@@ -332,6 +332,8 @@ def test_storage_dialog_is_desktop_only_and_versions_are_dynamic(tmp_path, monke
         assert label in page
     assert "id='storage-create-recovery' type='checkbox' checked" in page
     assert "id='storage-error'" in page and "role='alert'" in page
+    assert page.count("id='storage-cleanup-path'") == 1
+    assert "待清理的原数据目录" in page
 
 
 def test_storage_javascript_flow_focus_failures_and_byte_formatting():
@@ -369,7 +371,7 @@ let failure = null, selected = 'E:/', pending = false;
 const status = {current_path:'D:/<unsafe>', volume:'D:', usage:{database:100, logs:20, backups:30,
   webview:10, config:5, other:5, recovery:40, total:210},
   recovery:{created_at:'2026-10-01T00:00:00Z', size_bytes:40, successful_starts:2,
-  retention_days:7, required_starts:3}, pending_migration:false, pending_cleanup:false, busy:false};
+  retention_days:7, required_starts:3}, pending_migration:false, pending_cleanup:true, pending_cleanup_path:'F:/<leftover>/EVE Income Tracker', busy:false};
 global.window = {pywebview:{api:{
   async choose_data_parent() { calls.push('picker'); return selected; },
   async open_data_directory() { calls.push('open'); return true; },
@@ -399,6 +401,14 @@ vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
   assert.equal(element('data-settings-dialog').open,true);
   assert.equal(document.activeElement.id,'data-settings-close');
   assert.equal(element('storage-current-path').textContent,'D:/<unsafe>');
+  assert.equal(element('storage-cleanup-path').textContent,'F:/<leftover>/EVE Income Tracker');
+  assert.equal(element('storage-cleanup-notice').hidden,false);
+  status.pending_cleanup=false;
+  status.pending_cleanup_path=null;
+  element('data-settings-dialog').close();
+  await element('settings-button').fire();
+  assert.equal(element('storage-cleanup-path').textContent,'');
+  assert.equal(element('storage-cleanup-notice').hidden,true);
   await element('storage-open').fire();
   assert(calls.includes('open'));
   selected=null;
