@@ -46,9 +46,92 @@ def test_installer_upgrade_and_uninstall_preserve_data_by_default():
     assert "DelTree(UserDataRoot, True, True, True)" in script
     assert "默认保留钱包数据库、授权密钥、日志和备份" in script
     assert "确认永久删除以下完整目录" in script
-    assert r"{localappdata}\EVE Income Tracker" in script
-    assert "PathSame(UserDataRoot, ExpectedUserDataRoot)" in script
+    assert "RegWrite" not in script
+    assert "[Registry]" not in script
+    assert "RegDeleteKeyIncludingSubkeys" not in script
 
+
+def test_explicit_uninstall_requires_complete_current_registry_and_marker():
+    script = read(ISS)
+
+    for value in ("'DataRoot'", "'DataRootId'", "'DataRootSchema'"):
+        assert value in script
+    assert "RegQueryStringValue(HKCU" in script
+    assert "RegQueryDWordValue(HKCU" in script
+    for residue in (
+        "PreviousDataRoot",
+        "PreviousDataRootId",
+        "PreviousDataRootSchema",
+        "PreviousDataRootAbsent",
+        "CurrentSwitchCommitted",
+    ):
+        assert residue in script
+    for guard in (
+        "IsUuidV4",
+        "IsSafeDataRoot",
+        "IsCanonicalMarker",
+        "IsReparsePoint(CurrentPath)",
+        "IsReparsePoint(MarkerPath)",
+        "JsonEscape",
+    ):
+        assert guard in script
+    assert ".eve-income-tracker-data.json" in script
+    assert "DataRootSchema = 1" in script
+    assert "Pos('root_id'" not in script
+
+
+def test_uninstall_deletes_only_verified_root_and_keeps_registry_on_failure():
+    script = read(ISS)
+    uninstall = script.split("procedure CurUninstallStepChanged", 1)[1]
+
+    assert "ValidateDeleteTarget(UserDataRoot" in uninstall
+    assert "if DelTree(UserDataRoot, True, True, True) then" in uninstall
+    assert "RegDeleteKeyIfEmpty" in uninstall
+    assert uninstall.index("ValidateDeleteTarget(UserDataRoot") < uninstall.index(
+        "DelTree(UserDataRoot, True, True, True)"
+    )
+    assert uninstall.index("DelTree(UserDataRoot, True, True, True)") < uninstall.index(
+        "RegDeleteKeyIfEmpty"
+    )
+    assert r"{localappdata}\EVE Income Tracker" not in uninstall
+
+def _inno_function(script: str, name: str) -> str:
+    body = script.split(f"function {name}", 1)[1]
+    return body.split("\nfunction ", 1)[0].split("\nprocedure ", 1)[0]
+
+
+@pytest.mark.parametrize(
+    ("case", "function", "guard"),
+    [
+        ("missing triple", "ReadDeleteTarget", "HasRegistryType('DataRoot'"),
+        ("wrong schema", "ReadDeleteTarget", "(DataRootSchema = 1)"),
+        ("previous root residue", "ReadDeleteTarget", "'PreviousDataRoot'"),
+        ("switch residue", "ReadDeleteTarget", "'CurrentSwitchCommitted'"),
+        ("pending migration", "ReadDeleteTarget", "'PendingMigrationTarget'"),
+        ("invalid UUID", "ReadDeleteTarget", "IsUuidV4(RootId)"),
+        ("disk or broad root", "IsSafeDataRoot", "ExtractFileName(Root)"),
+        ("system path", "IsSafeDataRoot", "ExpandConstant('{win}')"),
+        ("install overlap", "IsSafeDataRoot", "ExpandConstant('{app}')"),
+        ("root reparse", "IsSafeDataRoot", "IsReparsePoint(CurrentPath)"),
+        ("marker reparse", "IsCanonicalMarker", "IsReparsePoint(MarkerPath)"),
+        ("missing marker", "IsCanonicalMarker", "LoadStringFromFile(MarkerPath"),
+        ("spoofed marker", "IsCanonicalMarker", "Contents = Utf8Encode(Expected)"),
+    ],
+)
+def test_installer_malicious_state_matrix_has_delete_guards(case, function, guard):
+    script = read(ISS)
+    assert guard in _inno_function(script, function), case
+
+
+def test_installer_rejects_short_malformed_values_before_indexing():
+    script = read(ISS)
+    uuid = _inno_function(script, "IsUuidV4")
+    path = _inno_function(script, "IsSafeDataRoot")
+    timestamp = _inno_function(script, "IsUtcTimestamp")
+
+    assert uuid.index("if Length(Value) <> 36 then") < uuid.index("Value[15]")
+    assert path.index("if Length(Root) < 5 then") < path.index("Root[2]")
+    assert timestamp.index("if Length(Value) < 20 then") < timestamp.index("Value[5]")
 
 def test_installer_checks_and_bootstraps_official_webview2_runtime():
     script = read(ISS)

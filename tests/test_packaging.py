@@ -9,6 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from app.data_roots import (
+    APP_ID,
+    MARKER_NAME,
+    DataRootMarker,
+    DataRootReference,
+    write_data_root_marker,
+)
 from app.desktop import SMOKE_RESULT_NAME, SMOKE_SUCCESS
 from app.paths import APP_DATA_DIRECTORY
 from app.version import APP_VERSION
@@ -65,6 +72,42 @@ def fake_svg_renderer(*, bytestring, output_width, output_height, unsafe):
     assert unsafe is False
     return png_bytes(output_width, bytestring)
 
+
+def test_python_marker_bytes_match_installer_exact_delete_contract(tmp_path):
+    root = tmp_path / "EVE Income Tracker"
+    root.mkdir()
+    root_id = "01234567-89ab-4cde-8abc-0123456789ab"
+    created_at = "2026-01-02T03:04:05.123456Z"
+    marker = DataRootMarker(
+        DataRootReference(root, root_id, 1), created_at, "ready"
+    )
+
+    write_data_root_marker(root, marker)
+
+    expected = (
+        json.dumps(
+            {
+                "app_id": APP_ID,
+                "created_at": created_at,
+                "root": str(root.resolve()),
+                "root_id": root_id,
+                "schema": 1,
+                "state": "ready",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    assert (root / MARKER_NAME).read_bytes() == expected
+
+    script = Path("packaging/eve-income-tracker.iss").read_text(encoding="utf-8")
+    assert "Utf8Decode(Contents)" in script
+    assert "JsonEscape(Root)" in script
+    assert "Contents = Utf8Encode(Expected)" in script
+    assert "DataAppId = '59D95F12-7D3B-4C8A-A57D-98F836769441'" in script
+    assert "DataMarkerName = '.eve-income-tracker-data.json'" in script
 
 def test_release_config_validation_and_generated_copy_are_public_and_exact(tmp_path):
     source = tmp_path / "release-config.local.json"
