@@ -1456,3 +1456,18 @@ def test_repository_error_uses_sanitized_data_error(context, monkeypatch):
         assert response.status_code == 500
         assert response.json()["error"]["code"] == "data_error"
         assert "private-" not in response.text
+
+
+def test_optional_desktop_controls_preserve_authenticated_web_session(context):
+    from app.desktop_control import DesktopControl
+
+    settings, services, clock = context
+    settings.runtime_mode = "desktop"
+    runtime = desktop_runtime(clock)
+    runtime.desktop_control = DesktopControl()
+    runtime.data_location = object()
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        assert client.get("/").status_code == 200
+        runtime.desktop_control.request_restart()
+        assert runtime.desktop_control.consume_restart() is True

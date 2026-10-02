@@ -50,6 +50,18 @@ def _isolated_environment(owned_root: Path) -> dict[str, str]:
             continue
         environment[name] = value
     environment["LOCALAPPDATA"] = str(owned_root)
+    for name, child in {
+        "APPDATA": "roaming",
+        "USERPROFILE": "profile",
+        "HOME": "profile",
+        "TEMP": "temp",
+        "TMP": "temp",
+    }.items():
+        directory = owned_root / child
+        directory.mkdir(exist_ok=True)
+        environment[name] = str(directory)
+    environment["HOMEDRIVE"] = owned_root.drive
+    environment["HOMEPATH"] = str(owned_root / "profile")[len(owned_root.drive) :]
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
 

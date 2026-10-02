@@ -7,6 +7,7 @@ for supported database schemas and the current user's existing protected key.
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -32,9 +33,11 @@ from app.data_roots import (
     DataRootMarker,
     DataRootReference,
     DataRootValidationError,
+    _directory_identity,
     _reject_reparse_components,
     _reject_reparse_tree,
     _reject_unsafe_root,
+    _validate_reference,
     data_root_from_parent,
     read_data_root_marker,
     relocate_existing_data_root,
@@ -194,10 +197,10 @@ class DataLocationController:
         self._switch(reference)
         return reference
 
-    def _new_marker(self, root: Path) -> DataRootMarker:
+    def _new_marker(self, root: Path, *, state: str = "ready") -> DataRootMarker:
         reference = DataRootReference(root, uuid4().hex, 1)
         stamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        return DataRootMarker(reference, stamp, "ready")
+        return DataRootMarker(reference, stamp, state)
 
     def _fresh(self, interaction: StartupInteraction) -> DataRootReference:
         default = self._default_parent / APP_DATA_DIRECTORY
@@ -220,7 +223,7 @@ class DataLocationController:
             parent, source_root=self._resource_root, install_root=self._resource_root
         )
         created = not root.exists()
-        marker = self._new_marker(root)
+        marker = self._new_marker(root, state="incomplete")
         try:
             root.mkdir(exist_ok=True)
             write_data_root_marker(root, marker)
@@ -312,7 +315,11 @@ class DataLocationController:
             return self._fresh(interaction)
         while True:
             try:
-                self._validate(current)
+                marker = read_data_root_marker(current.root)
+                if marker.state == "incomplete":
+                    self._initializing(current)
+                else:
+                    self._validate(current)
                 return current
             except (DataLocationError, DataRootValidationError) as exc:
                 code = exc.code
@@ -332,6 +339,42 @@ class DataLocationController:
                     current = self._current()
             else:
                 raise DataLocationError("startup_cancelled")
+
+    def _initializing(
+        self, reference: DataRootReference
+    ) -> tuple[AppPaths, DataRootMarker]:
+        """Authorize only the exact registered fresh-root continuation."""
+        if self._store.read_current() != reference:
+            raise DataLocationError("marker_mismatch")
+        root = _validate_reference(reference)
+        _reject_unsafe_root(root, self._resource_root.resolve())
+        marker = read_data_root_marker(root)
+        if marker.reference != reference or marker.state != "incomplete":
+            raise DataLocationError("marker_mismatch")
+        _reject_reparse_tree(root)
+        with tempfile.TemporaryFile(dir=root):
+            pass
+        return self._paths(root), marker
+
+    @_safe_operation
+    def complete_initialization(self, reference: DataRootReference) -> None:
+        """Commit ready only after normal key/database initialization validates."""
+        if self._store.read_current() != reference:
+            raise DataLocationError("marker_mismatch")
+        marker = read_data_root_marker(reference.root)
+        if marker.state == "ready":
+            self._validate(reference)
+            return
+        paths, marker = self._initializing(reference)
+        identity = _directory_identity(reference.root)
+        self._validate_contents(paths)
+        # Validation must never authorize a changed pointer, directory or marker.
+        _, current_marker = self._initializing(reference)
+        if current_marker != marker or _directory_identity(reference.root) != identity:
+            raise DataLocationError("marker_mismatch")
+        write_data_root_marker(
+            reference.root, DataRootMarker(reference, marker.created_at, "ready")
+        )
 
     @_safe_operation
     def execute_pending_migration(self) -> MigrationResult | None:

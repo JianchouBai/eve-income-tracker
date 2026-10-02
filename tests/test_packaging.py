@@ -260,6 +260,8 @@ def test_frozen_smoke_isolates_environment_and_deletes_only_owned_directory(
     assert captured["command"][1] == "--smoke-test"
     assert captured["environment"]["LOCALAPPDATA"] == str(captured["owned"])
     assert captured["environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    for name in ("APPDATA", "USERPROFILE", "HOME", "TEMP", "TMP"):
+        assert Path(captured["environment"][name]).is_relative_to(captured["owned"])
     assert not any(
         value == "private-environment-value"
         for value in captured["environment"].values()

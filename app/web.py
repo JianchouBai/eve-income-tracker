@@ -24,6 +24,8 @@ from app.auth_attempts import (
     AuthorizationAttemptStore,
 )
 from app.config import Settings
+from app.data_location_controller import DataLocationController
+from app.desktop_control import DesktopControl
 from app.desktop_session import DesktopLaunchTokenStore, DesktopSessionError
 from app.esi import EsiError
 from app.models import CharacterGroupRecord, CharacterRecord
@@ -139,6 +141,8 @@ class RuntimeContext:
     mode: Literal["development", "desktop"]
     attempts: AuthorizationAttemptStore
     launch_tokens: DesktopLaunchTokenStore
+    data_location: DataLocationController | None = None
+    desktop_control: DesktopControl | None = None
 
 
 class Clock:

@@ -801,3 +801,191 @@ def test_relocation_rejects_reparse_selected_parent_without_rewriting(tmp_path):
             alias.rmdir()
         else:
             alias.unlink()
+
+
+def test_fresh_initialization_marker_resumes_only_registered_root(tmp_path):
+    store = MemoryDataLocationStore()
+    controller = make_controller(tmp_path, store)
+    ref = controller.resolve_startup(
+        tmp_path / "local/EVE Income Tracker", Interaction()
+    )
+    assert read_data_root_marker(ref.root).state == "incomplete"
+    assert (
+        make_controller(tmp_path, store).resolve_startup(
+            ref.root, Interaction(fresh="exit")
+        )
+        == ref
+    )
+    assert not (ref.root / "data/eve_income.sqlite3").exists()
+
+
+@pytest.mark.parametrize(
+    "damage", ["id", "path", "schema", "malformed", "ready", "reparse"]
+)
+def test_incomplete_resume_rejects_untrusted_or_ready_missing_data(
+    tmp_path, monkeypatch, damage
+):
+    import json
+
+    import app.data_location_controller as module
+
+    store = MemoryDataLocationStore()
+    controller = make_controller(tmp_path, store)
+    ref = controller.resolve_startup(
+        tmp_path / "local/EVE Income Tracker", Interaction()
+    )
+    marker_path = ref.root / MARKER_NAME
+    payload = __import__("json").loads(marker_path.read_text(encoding="utf-8"))
+    payload["state"] = "incomplete"
+    if damage == "id":
+        payload["root_id"] = uuid4().hex
+    elif damage == "path":
+        payload["root"] = str(tmp_path / "elsewhere/EVE Income Tracker")
+    elif damage == "schema":
+        payload["schema"] = 2
+    elif damage == "ready":
+        payload["state"] = "ready"
+    marker_path.write_text(json.dumps(payload), encoding="utf-8")
+    if damage == "malformed":
+        marker_path.write_bytes(b"broken")
+    if damage == "reparse":
+        from app.data_roots import DataRootValidationError
+
+        def reject(root):
+            raise DataRootValidationError("path_reparse")
+
+        monkeypatch.setattr(module, "_reject_reparse_tree", reject)
+    before = marker_path.read_bytes()
+    with pytest.raises(DataLocationError, match="startup_cancelled"):
+        controller.resolve_startup(ref.root, Interaction(actions=["exit"]))
+    assert marker_path.read_bytes() == before
+    assert not (ref.root / "data").exists()
+
+
+def test_unregistered_incomplete_root_cannot_be_adopted_or_located(tmp_path):
+    paths, ref = existing(tmp_path)
+    write_data_root_marker(
+        ref.root, DataRootMarker(ref, "2026-10-02T00:00:00Z", "incomplete")
+    )
+    store = MemoryDataLocationStore()
+    controller = make_controller(tmp_path, store)
+    with pytest.raises(DataLocationError):
+        controller.resolve_startup(paths.data_root, Interaction(legacy="keep"))
+    with pytest.raises(DataLocationError):
+        controller.reconnect_existing(paths.data_root)
+    assert store.read_current() is None
+    assert read_data_root_marker(ref.root).state == "incomplete"
+
+
+def test_complete_initialization_validates_then_atomically_marks_ready_and_is_idempotent(
+    tmp_path,
+):
+    paths, ref = existing(tmp_path)
+    marker = DataRootMarker(ref, "2026-10-02T00:00:00Z", "incomplete")
+    write_data_root_marker(ref.root, marker)
+    store = MemoryDataLocationStore()
+    select(store, ref)
+    controller = make_controller(tmp_path, store)
+    controller.complete_initialization(ref)
+    ready = read_data_root_marker(ref.root)
+    assert ready == DataRootMarker(ref, marker.created_at, "ready")
+    before = (ref.root / MARKER_NAME).read_bytes()
+    controller.complete_initialization(ref)
+    assert (ref.root / MARKER_NAME).read_bytes() == before
+    assert controller.resolve_startup(paths.data_root, Interaction()) == ref
+
+
+def test_complete_initialization_write_failure_remains_retryable(tmp_path, monkeypatch):
+    import app.data_location_controller as module
+
+    paths, ref = existing(tmp_path)
+    marker = DataRootMarker(ref, "2026-10-02T00:00:00Z", "incomplete")
+    write_data_root_marker(ref.root, marker)
+    store = MemoryDataLocationStore()
+    select(store, ref)
+    controller = make_controller(tmp_path, store)
+    writer = module.write_data_root_marker
+
+    def fail(*args):
+        raise OSError("private-marker-failure")
+
+    monkeypatch.setattr(module, "write_data_root_marker", fail)
+    with pytest.raises(DataLocationError):
+        controller.complete_initialization(ref)
+    assert read_data_root_marker(ref.root) == marker
+    assert controller.resolve_startup(paths.data_root, Interaction()) == ref
+    monkeypatch.setattr(module, "write_data_root_marker", writer)
+    controller.complete_initialization(ref)
+    assert read_data_root_marker(ref.root).state == "ready"
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing_key", "corrupt_database", "changed_pointer", "changed_marker"]
+)
+def test_complete_initialization_refuses_partial_or_changed_contents(tmp_path, damage):
+    paths, ref = existing(tmp_path)
+    marker = DataRootMarker(ref, "2026-10-02T00:00:00Z", "incomplete")
+    write_data_root_marker(ref.root, marker)
+    store = MemoryDataLocationStore()
+    select(store, ref)
+
+    def validate(paths):
+        if damage == "changed_pointer":
+            _, other = existing(tmp_path, "other")
+            select(store, other)
+        elif damage == "changed_marker":
+            write_data_root_marker(
+                ref.root,
+                DataRootMarker(
+                    DataRootReference(ref.root, uuid4().hex, 1),
+                    marker.created_at,
+                    "incomplete",
+                ),
+            )
+        elif damage == "corrupt_database":
+            raise ValueError("invalid database")
+
+    if damage == "missing_key":
+        paths.key_path.unlink()
+    controller = make_controller(tmp_path, store, validator=validate)
+    with pytest.raises(DataLocationError):
+        controller.complete_initialization(ref)
+    assert read_data_root_marker(ref.root).state == "incomplete"
+
+
+def test_incomplete_root_with_real_directory_junction_is_never_resumed(tmp_path):
+    import os
+    import subprocess
+
+    store = MemoryDataLocationStore()
+    controller = make_controller(tmp_path, store)
+    ref = controller.resolve_startup(
+        tmp_path / "local/EVE Income Tracker", Interaction()
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "keep.txt"
+    sentinel.write_bytes(b"untouched")
+    link = ref.root / "config"
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+    try:
+        interaction = Interaction(actions=["exit"])
+        with pytest.raises(DataLocationError, match="startup_cancelled"):
+            controller.resolve_startup(ref.root, interaction)
+        assert interaction.errors == ["path_reparse"]
+        assert sentinel.read_bytes() == b"untouched"
+        assert not (ref.root / "data").exists()
+        with pytest.raises(DataLocationError, match="path_reparse"):
+            controller.complete_initialization(ref)
+    finally:
+        if os.name == "nt":
+            link.rmdir()
+        else:
+            link.unlink()
