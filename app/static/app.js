@@ -588,8 +588,170 @@ async function sync() {
   }
 }
 
+
+function formatBytes(value) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return '—';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+  return unit === 0 ? `${size} B` : `${size.toFixed(1)} ${units[unit]}`;
+}
+
+function bindDataSettings() {
+  if (document.body.dataset.runtimeMode !== 'desktop' || !$('settings-button')) return;
+  const dialog = $('data-settings-dialog');
+  let busy = false;
+  let status = null;
+  let estimate = null;
+  let targetParent = null;
+  let returnFocus = null;
+  const operations = ['storage-open', 'storage-change', 'storage-delete-recovery',
+    'storage-confirm', 'storage-cancel', 'storage-create-recovery', 'storage-restart'];
+
+  function availability() {
+    const blocked = busy || status?.busy === true;
+    dialog.setAttribute('aria-busy', String(busy));
+    operations.forEach((id) => { $(id).disabled = blocked; });
+    $('storage-open').disabled = blocked || !status;
+    $('storage-change').disabled = blocked || !status || status.pending_migration || status.pending_cleanup;
+    $('storage-delete-recovery').disabled = blocked || !status?.recovery || status.pending_migration;
+    $('storage-confirm').disabled = blocked || !estimate || estimate.space_sufficient !== true || status?.pending_migration;
+    $('storage-restart').disabled = blocked || !status?.pending_migration;
+    $('storage-restart').hidden = !status?.pending_migration;
+  }
+
+  function showError(error, fallback = '无法完成操作，请稍后重试。') {
+    $('storage-error').textContent = error?.message || fallback;
+    $('storage-error').hidden = false;
+  }
+
+  async function run(action) {
+    if (busy) return;
+    busy = true;
+    availability();
+    $('storage-error').hidden = true;
+    try { await action(); } catch (error) { showError(error); }
+    finally { busy = false; availability(); }
+  }
+
+  function storageRequest(suffix, method, payload) {
+    return request('/api/desktop/data-location' + suffix, {
+      method, headers: { 'X-CSRF-Token': csrf, ...(payload ? { 'Content-Type': 'application/json' } : {}) },
+      ...(payload ? { body: JSON.stringify(payload) } : {}),
+    });
+  }
+
+  function renderStatus() {
+    $('storage-current-path').textContent = status.current_path;
+    $('storage-volume').textContent = status.volume;
+    ['database', 'logs', 'backups', 'webview', 'config', 'other', 'total'].forEach((key) => {
+      $('storage-' + key).textContent = formatBytes(status.usage?.[key]);
+    });
+    $('storage-recovery-usage').textContent = formatBytes(status.usage?.recovery);
+    const recovery = status.recovery;
+    $('storage-recovery-details').textContent = recovery
+      ? `创建时间：${recovery.created_at}；实际大小：${formatBytes(recovery.size_bytes)}；成功启动：${recovery.successful_starts} 次。`
+      : '当前没有迁移恢复副本。';
+    $('storage-status').textContent = status.pending_migration
+      ? '已安排迁移，请重启应用完成。'
+      : status.pending_cleanup ? '原数据目录尚未清理完成，将在下次启动安全重试。' : '';
+  }
+
+  async function refreshStatus() {
+    status = await get('/api/desktop/data-location');
+    renderStatus();
+  }
+
+  async function updateEstimate() {
+    estimate = null;
+    const result = await storageRequest('/estimate', 'POST', {
+      target_parent: targetParent, create_recovery: $('storage-create-recovery').checked,
+    });
+    estimate = result;
+    $('storage-target-path').textContent = result.target_path;
+    $('storage-copy-bytes').textContent = formatBytes(result.copy_bytes);
+    $('storage-recovery-bytes').textContent = formatBytes(result.recovery_bytes);
+    $('storage-free-bytes').textContent = formatBytes(result.free_bytes);
+    $('storage-space-warning').hidden = result.space_sufficient === true;
+    $('storage-confirmation').hidden = false;
+  }
+
+  async function restart() {
+    try {
+      const restarted = await window.pywebview.api.restart_for_migration();
+      if (restarted !== true) throw new Error();
+    } catch {
+      throw new Error('迁移已安排，但无法重启。请关闭应用后重新打开以完成迁移。');
+    }
+  }
+
+  $('settings-button').addEventListener('click', async () => {
+    returnFocus = document.activeElement;
+    if (!dialog.open) dialog.showModal();
+    $('data-settings-close').focus();
+    await run(refreshStatus);
+  });
+  $('data-settings-close').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('close', () => { (returnFocus || $('settings-button')).focus(); });
+  // Native modal dialog handles Escape, Tab containment and background inertness.
+  $('storage-open').addEventListener('click', () => run(async () => {
+    try {
+      if (await window.pywebview.api.open_data_directory() !== true) throw new Error();
+    } catch { throw new Error('无法打开当前数据目录，请检查磁盘连接后重试。'); }
+  }));
+  $('storage-change').addEventListener('click', () => run(async () => {
+    let selected;
+    try { selected = await window.pywebview.api.choose_data_parent(); }
+    catch { throw new Error('无法选择目录，请重试。'); }
+    if (selected === null || selected === undefined) return;
+    if (typeof selected !== 'string' || !selected.trim()) throw new Error('所选目录无效，请重新选择。');
+    targetParent = selected;
+    estimate = null;
+    $('storage-confirmation').hidden = true;
+    $('storage-create-recovery').checked = true;
+    await updateEstimate();
+    // Enable before moving focus; disabled controls cannot receive focus.
+    busy = false;
+    availability();
+    if (dialog.open) {
+      (estimate.space_sufficient === true ? $('storage-confirm') : $('storage-create-recovery')).focus();
+    }
+  }));
+  $('storage-create-recovery').addEventListener('change', () => run(updateEstimate));
+  $('storage-cancel').addEventListener('click', () => {
+    estimate = null;
+    targetParent = null;
+    $('storage-confirmation').hidden = true;
+    availability();
+    $('storage-change').focus();
+  });
+  $('storage-confirm').addEventListener('click', () => {
+    if (!estimate || estimate.space_sufficient !== true || !targetParent) return;
+    return run(async () => {
+      const scheduled = await storageRequest('/migrations', 'POST', {
+        target_parent: targetParent, create_recovery: $('storage-create-recovery').checked,
+      });
+      if (scheduled.scheduled !== true) throw new Error('迁移未安排，请重新确认。');
+      status.pending_migration = true;
+      estimate = null;
+      $('storage-confirmation').hidden = true;
+      $('storage-status').textContent = '迁移已安排，应用即将重启。';
+      await restart();
+    });
+  });
+  $('storage-restart').addEventListener('click', () => run(restart));
+  $('storage-delete-recovery').addEventListener('click', () => run(async () => {
+    const deleted = await storageRequest('/recovery', 'DELETE');
+    await refreshStatus();
+    $('storage-status').textContent = `已释放 ${formatBytes(deleted.freed_bytes)}。`;
+  }));
+  availability();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   bindDesktopAuthorization();
+  bindDataSettings();
   if (document.body.dataset.authenticated !== 'true') return;
   $('date-to').value = beijingDate();
   $('date-from').value = beijingDate(-29);

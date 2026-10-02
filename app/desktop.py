@@ -27,7 +27,7 @@ from app.database_lifecycle import (
     _read_only_connection,
     _schema_is_supported,
 )
-from app.desktop_bridge import DesktopBridge
+from app.desktop_bridge import DesktopBridge, DesktopBridgeFactory
 from app.desktop_control import DesktopControl
 from app.desktop_server import LocalServer, LocalServerError, wait_until_healthy
 from app.desktop_session import DesktopLaunchTokenStore
@@ -268,7 +268,7 @@ class DesktopDependencies:
     app_builder: Callable[[Settings, Any], Any] = build_app
     server_factory: Callable[[Any], Any] = LocalServer
     health_waiter: Callable[[Any], None] = wait_until_healthy
-    bridge_factory: Callable[[], Any] = DesktopBridge
+    bridge_factory: DesktopBridgeFactory = DesktopBridge
     webview_loader: Callable[[], Any] = _load_webview
     error_shower: Callable[[str], None] = show_native_error
     session_secret_factory: Callable[[], str] = _new_session_secret
@@ -570,7 +570,13 @@ class DesktopApplication:
                                     "REMOTE_DEBUGGING_PORT": None,
                                 }
                             )
-                            authorization_bridge = dependencies.bridge_factory()
+                            authorization_bridge = dependencies.bridge_factory(
+                                data_location=controller,
+                                desktop_control=control,
+                                directory_picker=lambda: (
+                                    interaction.choose_data_parent()
+                                ),
+                            )
                             launch_url = "http://localhost:8000/?" + urlencode(
                                 {"launch_token": launch_token}
                             )

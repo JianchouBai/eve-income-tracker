@@ -1471,3 +1471,327 @@ def test_optional_desktop_controls_preserve_authenticated_web_session(context):
         assert client.get("/").status_code == 200
         runtime.desktop_control.request_restart()
         assert runtime.desktop_control.consume_restart() is True
+
+
+from pathlib import Path
+
+from app.data_location_controller import DataLocationError, DataLocationStatus
+from app.data_location_store import PendingMigration
+from app.data_migration import MigrationEstimate
+from app.migration_recovery import RecoverySnapshotInfo
+
+
+class SettingsLocationFake:
+    def __init__(self):
+        self.pending = None
+        self.failure = None
+        self.free = 200000
+        self.calls = []
+        self.recovery = RecoverySnapshotInfo(
+            Path("D:/private-archive"), datetime(2026, 10, 1, tzinfo=UTC), 40, 2
+        )
+
+    def status(self):
+        if self.failure:
+            raise self.failure
+        return DataLocationStatus(
+            Path("D:/EVE Income Tracker"),
+            "D:",
+            {
+                "database": 100,
+                "logs": 20,
+                "backups": 30,
+                "webview": 10,
+                "config": 5,
+                "other": 5,
+                "recovery": 40,
+                "total": 210,
+            },
+            self.recovery,
+            pending_migration=self.pending,
+        )
+
+    def estimate(self, parent, *, create_recovery=True):
+        self.calls.append(("estimate", parent, create_recovery))
+        if self.failure:
+            raise self.failure
+        return MigrationEstimate(
+            parent / "EVE Income Tracker", 100, 40 if create_recovery else 0, self.free
+        )
+
+    def schedule_migration(self, parent, *, create_recovery=True):
+        result = self.estimate(parent, create_recovery=create_recovery)
+        if self.free < 65676:
+            raise DataLocationError("space_insufficient")
+        self.pending = PendingMigration(parent, create_recovery)
+        return result
+
+    def delete_recovery(self):
+        if self.failure:
+            raise self.failure
+        size = self.recovery.size_bytes if self.recovery else 0
+        self.recovery = None
+        return size
+
+
+@pytest.fixture
+def storage_context(context):
+    settings, services, clock = context
+    settings.runtime_mode = "desktop"
+    runtime = desktop_runtime(clock)
+    runtime.data_location = SettingsLocationFake()
+    return settings, services, clock, runtime
+
+
+STORAGE_ROUTES = [
+    ("GET", "/api/desktop/data-location"),
+    ("POST", "/api/desktop/data-location/estimate"),
+    ("POST", "/api/desktop/data-location/migrations"),
+    ("DELETE", "/api/desktop/data-location/recovery"),
+]
+
+
+@pytest.mark.parametrize("method,path", STORAGE_ROUTES)
+def test_storage_requires_desktop_signed_session_and_exact_csrf(
+    storage_context, method, path
+):
+    settings, services, clock, runtime = storage_context
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        assert client.request(method, path).status_code == 401
+        launch_desktop(client, settings, runtime)
+        if method != "GET":
+            for token in (None, "wrong"):
+                response = client.request(
+                    method, path, headers={"X-CSRF-Token": token} if token else {}
+                )
+                assert response.status_code == 403
+                assert response.json()["error"]["code"] == "csrf_failed"
+        signed = (
+            TimestampSigner(settings.app_session_secret)
+            .sign(
+                base64.b64encode(
+                    json.dumps(
+                        {"viewer_authenticated": True, "csrf_token": "known"}
+                    ).encode()
+                )
+            )
+            .decode()
+        )
+        client.cookies.clear()
+        client.cookies.set("session", signed)
+        assert (
+            client.request(method, path, headers={"X-CSRF-Token": "known"}).status_code
+            == 401
+        )
+
+
+@pytest.mark.parametrize("method,path", STORAGE_ROUTES)
+def test_storage_is_unavailable_in_development(context, method, path):
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        response = client.request(method, path, content="not-json")
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "not_found"
+
+
+def test_storage_status_estimate_schedule_and_idempotent_delete(storage_context):
+    settings, services, clock, runtime = storage_context
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        headers = csrf_headers(client, settings)
+        response = client.get("/api/desktop/data-location")
+        assert response.json() == {
+            "current_path": str(Path("D:/EVE Income Tracker")),
+            "volume": "D:",
+            "usage": {
+                "database": 100,
+                "logs": 20,
+                "backups": 30,
+                "webview": 10,
+                "config": 5,
+                "other": 5,
+                "recovery": 40,
+                "total": 210,
+            },
+            "recovery": {
+                "created_at": "2026-10-01T00:00:00+00:00",
+                "size_bytes": 40,
+                "successful_starts": 2,
+                "retention_days": 7,
+                "required_starts": 3,
+            },
+            "pending_migration": False,
+            "pending_cleanup": False,
+            "busy": False,
+        }
+        assert "private-" not in response.text
+        payload = {"target_parent": "E:/", "create_recovery": False}
+        estimate = client.post(
+            "/api/desktop/data-location/estimate", json=payload, headers=headers
+        )
+        assert estimate.json() == {
+            "target_path": str(Path("E:/EVE Income Tracker")),
+            "copy_bytes": 100,
+            "recovery_bytes": 0,
+            "free_bytes": 200000,
+            "space_sufficient": True,
+        }
+        for expected in (40, 0):
+            deleted = client.delete(
+                "/api/desktop/data-location/recovery", headers=headers
+            )
+            assert deleted.json() == {"freed_bytes": expected}
+        scheduled = client.post(
+            "/api/desktop/data-location/migrations", json=payload, headers=headers
+        )
+        assert scheduled.status_code == 202
+        assert scheduled.json() == {
+            "scheduled": True,
+            "target_path": str(Path("E:/EVE Income Tracker")),
+        }
+        assert runtime.data_location.pending == PendingMigration(Path("E:/"), False)
+        assert (
+            client.get("/api/desktop/data-location").json()["pending_migration"] is True
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {},
+        {"target_parent": 123},
+        {"target_parent": ""},
+        {"target_parent": "E:/", "create_recovery": "false"},
+        {"target_parent": "E:/", "create_recovery": 0},
+        {"target_parent": "E:/", "create_recovery": True, "action": "delete"},
+    ],
+)
+@pytest.mark.parametrize("suffix", ["estimate", "migrations"])
+def test_storage_strict_json_rejects_invalid_payload(storage_context, payload, suffix):
+    settings, services, clock, runtime = storage_context
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        response = client.post(
+            "/api/desktop/data-location/" + suffix,
+            content=json.dumps(payload),
+            headers={
+                **csrf_headers(client, settings),
+                "Content-Type": "application/json",
+            },
+        )
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request"
+        assert runtime.data_location.calls == []
+
+
+@pytest.mark.parametrize(
+    "content,content_type",
+    [
+        ('{"target_parent":"E:/","create_recovery":true}', "text/plain"),
+        ('{"target_parent":"E:/","create_recovery":true}', None),
+        ("{secret", "application/json"),
+        (
+            '{"target_parent":"E:/","target_parent":"F:/","create_recovery":true}',
+            "application/json",
+        ),
+    ],
+)
+def test_storage_rejects_non_json_and_duplicate_fields(
+    storage_context, content, content_type
+):
+    settings, services, clock, runtime = storage_context
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        headers = csrf_headers(client, settings)
+        if content_type:
+            headers["Content-Type"] = content_type
+        response = client.post(
+            "/api/desktop/data-location/estimate", content=content, headers=headers
+        )
+        assert response.status_code == 400
+        assert runtime.data_location.calls == []
+
+
+def test_storage_insufficient_space_and_safe_failure(storage_context):
+    settings, services, clock, runtime = storage_context
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        headers = csrf_headers(client, settings)
+        runtime.data_location.free = 10
+        payload = {"target_parent": "E:/", "create_recovery": True}
+        assert (
+            client.post(
+                "/api/desktop/data-location/estimate", json=payload, headers=headers
+            ).json()["space_sufficient"]
+            is False
+        )
+        response = client.post(
+            "/api/desktop/data-location/migrations", json=payload, headers=headers
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "space_insufficient"
+        assert runtime.data_location.pending is None
+        runtime.data_location.failure = RuntimeError("private-key C:/private-path")
+        for method, path in STORAGE_ROUTES:
+            response = client.request(
+                method,
+                path,
+                json=payload if method == "POST" else None,
+                headers=headers,
+            )
+            assert response.status_code == 500
+            assert response.json() == {
+                "error": {
+                    "code": "location_operation_failed",
+                    "message": "无法完成数据存储操作，请检查目录后重试。",
+                }
+            }
+            assert "private-" not in response.text
+
+
+@pytest.mark.parametrize(
+    "code,status_code",
+    [
+        ("path_invalid", 400),
+        ("path_not_writable", 400),
+        ("path_reparse", 400),
+        ("path_unsafe", 400),
+        ("target_not_empty", 400),
+        ("migration_pending", 409),
+        ("cleanup_pending", 409),
+        ("private-registry-key", 500),
+    ],
+)
+def test_storage_exposes_only_allowlisted_errors(storage_context, code, status_code):
+    settings, services, clock, runtime = storage_context
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        runtime.data_location.failure = DataLocationError(code)
+        response = client.post(
+            "/api/desktop/data-location/estimate",
+            json={"target_parent": "E:/", "create_recovery": True},
+            headers=csrf_headers(client, settings),
+        )
+        assert response.status_code == status_code
+        assert "private-" not in response.text
+
+
+def test_storage_delete_rejects_payload_and_pending_migration(storage_context):
+    settings, services, clock, runtime = storage_context
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        headers = csrf_headers(client, settings)
+        response = client.request(
+            "DELETE",
+            "/api/desktop/data-location/recovery",
+            json={"action": "delete_all"},
+            headers=headers,
+        )
+        assert response.status_code == 400
+        assert runtime.data_location.recovery is not None
+        runtime.data_location.pending = PendingMigration(Path("E:/"), True)
+        response = client.delete("/api/desktop/data-location/recovery", headers=headers)
+        assert response.status_code == 409
+        assert runtime.data_location.recovery is not None

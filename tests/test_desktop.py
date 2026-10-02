@@ -264,7 +264,7 @@ def recording_dependencies(
         if failure == "health":
             raise LocalServerError("health_timeout")
 
-    def bridge_factory():
+    def bridge_factory(*, data_location, desktop_control, directory_picker):
         events.append("bridge")
         return object()
 
@@ -1540,3 +1540,34 @@ def test_fresh_failed_launch_resumes_exact_root_on_next_process(
     assert store.read_current() == reference
     assert read_data_root_marker(reference.root).state == "ready"
     assert Database(paths.database_path).inspect_version() == LATEST_SCHEMA_VERSION
+
+
+def test_desktop_injects_only_storage_capabilities_into_window_bridge(tmp_path):
+    events = []
+    dependencies, _, _, _ = recording_dependencies(tmp_path, events)
+    selected_parent = tmp_path / "chosen"
+    from dataclasses import replace
+
+    dependencies = replace(
+        dependencies,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            choose_data_parent=lambda: selected_parent
+        ),
+    )
+    constructed = []
+
+    def factory(*, data_location, desktop_control, directory_picker):
+        constructed.append((data_location, desktop_control, directory_picker()))
+        return object()
+
+    dependencies = replace(dependencies, bridge_factory=factory)
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 0
+    )
+    runtime = next(
+        item[2] for item in events if isinstance(item, tuple) and item[0] == "app"
+    )
+    assert constructed == [
+        (runtime.data_location, runtime.desktop_control, selected_parent)
+    ]

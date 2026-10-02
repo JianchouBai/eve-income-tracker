@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import secrets
@@ -7,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -24,7 +26,7 @@ from app.auth_attempts import (
     AuthorizationAttemptStore,
 )
 from app.config import Settings
-from app.data_location_controller import DataLocationController
+from app.data_location_controller import DataLocationController, DataLocationError
 from app.desktop_control import DesktopControl
 from app.desktop_session import DesktopLaunchTokenStore, DesktopSessionError
 from app.esi import EsiError
@@ -41,6 +43,7 @@ from app.storage import (
     UnknownGroupError,
 )
 from app.sync import SyncService
+from app.version import APP_VERSION
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 logger = logging.getLogger(__name__)
@@ -262,6 +265,7 @@ def create_app(
         services.characters.database.initialize()
         yield
 
+    storage_lock = Lock()
     app = FastAPI(lifespan=lifespan)
     app.state.services = services
     app.state.runtime = runtime
@@ -335,8 +339,169 @@ def create_app(
                 "authenticated": request.session.get("viewer_authenticated", False),
                 "csrf_token": request.session.get("csrf_token", ""),
                 "runtime_mode": runtime.mode,
+                "app_version": APP_VERSION,
+                "short_version": ".".join(APP_VERSION.split(".")[:2]),
             },
         )
+
+    def storage_controller(request: Request, *, mutate: bool = False):
+        if runtime.mode != "desktop":
+            raise WebError(404, "not_found", "页面不存在。")
+        _require_viewer(request)
+        session_id = request.session.get("desktop_session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise WebError(401, "authentication_required", "桌面会话无效，请重启应用。")
+        if mutate:
+            _require_csrf(request)
+        if runtime.data_location is None:
+            raise WebError(
+                503, "storage_unavailable", "数据存储设置不可用，请重启应用。"
+            )
+        return runtime.data_location
+
+    def storage_failure(error: Exception):
+        messages = {
+            "space_insufficient": (
+                409,
+                "目标可用空间不足，请选择其他目录或取消恢复副本。",
+            ),
+            "migration_pending": (409, "已有待处理迁移，请重启应用完成迁移。"),
+            "cleanup_pending": (409, "原数据目录尚未清理，请重启应用后重试。"),
+            "path_invalid": (400, "目录无效，请选择完整的本地目录。"),
+            "path_not_writable": (400, "目录不可写，请检查权限或选择其他目录。"),
+            "path_reparse": (400, "目录包含不受支持的链接，请选择其他目录。"),
+            "path_unavailable": (400, "目录不可用，请连接磁盘并重新选择。"),
+            "path_unsafe": (400, "此目录不能作为数据位置，请选择其他目录。"),
+            "target_not_empty": (400, "目标目录非空，请选择其他目录。"),
+        }
+        code = error.code if isinstance(error, DataLocationError) else ""
+        if code in messages:
+            status, message = messages[code]
+            raise WebError(status, code, message) from None
+        raise WebError(
+            500, "location_operation_failed", "无法完成数据存储操作，请检查目录后重试。"
+        ) from None
+
+    async def migration_payload(request: Request):
+        # Parse only after mode/session/CSRF, including wrong media types and malformed JSON.
+        if (
+            request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            != "application/json"
+        ):
+            raise WebError(400, "invalid_request", "请求参数无效。")
+
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+
+        try:
+            payload = json.loads(await request.body(), object_pairs_hook=unique_object)
+            if not isinstance(payload, dict) or set(payload) != {
+                "target_parent",
+                "create_recovery",
+            }:
+                raise ValueError
+            parent = payload["target_parent"]
+            if (
+                not isinstance(parent, str)
+                or not parent.strip()
+                or len(parent) > 32767
+                or "\x00" in parent
+                or type(payload["create_recovery"]) is not bool
+            ):
+                raise ValueError
+            return Path(parent), payload["create_recovery"]
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            raise WebError(400, "invalid_request", "请求参数无效。") from None
+
+    @app.get("/api/desktop/data-location")
+    async def data_location_status(request: Request):
+        controller = storage_controller(request)
+        try:
+            status = controller.status()
+            recovery = status.recovery
+            return {
+                "current_path": str(status.current_path),
+                "volume": status.volume,
+                "usage": {
+                    key: status.usage.get(key, 0)
+                    for key in (
+                        "database",
+                        "logs",
+                        "backups",
+                        "webview",
+                        "config",
+                        "other",
+                        "recovery",
+                        "total",
+                    )
+                },
+                "recovery": None
+                if recovery is None
+                else {
+                    "created_at": recovery.created_at.isoformat(),
+                    "size_bytes": recovery.size_bytes,
+                    "successful_starts": recovery.successful_starts,
+                    "retention_days": 7,
+                    "required_starts": 3,
+                },
+                "pending_migration": status.pending_migration is not None,
+                "pending_cleanup": status.pending_cleanup is not None,
+                "busy": storage_lock.locked(),
+            }
+        except Exception as error:  # noqa: BLE001 - public filesystem boundary.
+            storage_failure(error)
+
+    @app.post("/api/desktop/data-location/estimate")
+    async def estimate_data_location(request: Request):
+        controller = storage_controller(request, mutate=True)
+        parent, recovery = await migration_payload(request)
+        try:
+            estimate = controller.estimate(parent, create_recovery=recovery)
+            return {
+                "target_path": str(estimate.target_root),
+                "copy_bytes": estimate.copy_bytes,
+                "recovery_bytes": estimate.recovery_bytes,
+                "free_bytes": estimate.free_bytes,
+                "space_sufficient": estimate.free_bytes
+                >= estimate.copy_bytes + estimate.recovery_bytes + 65536,
+            }
+        except Exception as error:  # noqa: BLE001 - public filesystem boundary.
+            storage_failure(error)
+
+    @app.post("/api/desktop/data-location/migrations", status_code=202)
+    async def schedule_data_location(request: Request):
+        controller = storage_controller(request, mutate=True)
+        parent, recovery = await migration_payload(request)
+        if not storage_lock.acquire(blocking=False):
+            raise WebError(409, "storage_busy", "数据存储操作正在进行，请稍后重试。")
+        try:
+            estimate = controller.schedule_migration(parent, create_recovery=recovery)
+            return {"scheduled": True, "target_path": str(estimate.target_root)}
+        except Exception as error:  # noqa: BLE001 - public filesystem boundary.
+            storage_failure(error)
+        finally:
+            storage_lock.release()
+
+    @app.delete("/api/desktop/data-location/recovery")
+    async def delete_data_recovery(request: Request):
+        controller = storage_controller(request, mutate=True)
+        if await request.body():
+            raise WebError(400, "invalid_request", "请求参数无效。")
+        if not storage_lock.acquire(blocking=False):
+            raise WebError(409, "storage_busy", "数据存储操作正在进行，请稍后重试。")
+        try:
+            if controller.status().pending_migration is not None:
+                raise DataLocationError("migration_pending")
+            return {"freed_bytes": controller.delete_recovery()}
+        except Exception as error:  # noqa: BLE001 - public filesystem boundary.
+            storage_failure(error)
+        finally:
+            storage_lock.release()
 
     @app.get("/auth/login")
     async def login(request: Request):

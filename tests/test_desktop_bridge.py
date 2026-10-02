@@ -71,4 +71,87 @@ def test_bridge_converts_browser_failure_to_safe_error():
 def test_bridge_exposes_no_file_picker_or_general_shell_method():
     public_methods = {name for name in dir(DesktopBridge) if not name.startswith("_")}
 
-    assert public_methods == {"open_authorization_url"}
+    assert public_methods == {
+        "open_authorization_url",
+        "choose_data_parent",
+        "open_data_directory",
+        "restart_for_migration",
+    }
+
+
+from pathlib import Path
+from types import SimpleNamespace
+
+from app.desktop_control import DesktopControl
+
+
+class LocationFake:
+    def __init__(self):
+        self.current = Path("D:/EVE Income Tracker")
+        self.pending = None
+        self.failure = False
+
+    def status(self):
+        if self.failure:
+            raise RuntimeError("private-path-key")
+        return SimpleNamespace(
+            current_path=self.current, pending_migration=self.pending
+        )
+
+
+def test_storage_bridge_revalidates_current_directory_and_gates_restart():
+    location = LocationFake()
+    control = DesktopControl()
+    opened = []
+    bridge = DesktopBridge(
+        data_location=location,
+        desktop_control=control,
+        directory_picker=lambda: Path("E:/"),
+        directory_opener=opened.append,
+    )
+    assert bridge.choose_data_parent() == str(Path("E:/"))
+    assert bridge.open_data_directory() is True
+    location.current = Path("E:/EVE Income Tracker")
+    assert bridge.open_data_directory() is True
+    assert opened == [Path("D:/EVE Income Tracker"), location.current]
+    with pytest.raises(RuntimeError, match="migration_not_pending"):
+        bridge.restart_for_migration()
+    assert control.consume_restart() is False
+    location.pending = object()
+    assert bridge.restart_for_migration() is True
+    assert control.consume_restart() is True
+    location.failure = True
+    for action in (bridge.open_data_directory, bridge.restart_for_migration):
+        with pytest.raises(RuntimeError) as error:
+            action()
+        assert "private-" not in str(error.value)
+    assert len(opened) == 2
+    assert control.consume_restart() is False
+
+
+def test_storage_bridge_cancel_and_argument_rejection():
+    bridge = DesktopBridge(directory_picker=lambda: None)
+    assert bridge.choose_data_parent() is None
+    for action in (
+        bridge.choose_data_parent,
+        bridge.open_data_directory,
+        bridge.restart_for_migration,
+    ):
+        with pytest.raises(TypeError):
+            action("C:/Windows")
+
+    def fail():
+        raise OSError("private-path-key")
+
+    bridge = DesktopBridge(directory_picker=fail)
+    with pytest.raises(RuntimeError) as error:
+        bridge.choose_data_parent()
+    assert "private-" not in str(error.value)
+
+
+def test_directory_open_false_result_is_a_safe_failure():
+    bridge = DesktopBridge(
+        data_location=LocationFake(), directory_opener=lambda path: False
+    )
+    with pytest.raises(RuntimeError, match="directory_open_failed"):
+        bridge.open_data_directory()

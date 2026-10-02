@@ -283,3 +283,153 @@ def test_desktop_authorization_script_uses_only_allowlisted_bridge_and_bounded_p
     assert "for (let poll = 0; poll < 120; poll += 1)" not in script
     assert "window.open(" not in script
     assert "href='/auth/login'" in page
+
+
+def test_storage_dialog_is_desktop_only_and_versions_are_dynamic(tmp_path, monkeypatch):
+    from app import web
+    from app.auth_attempts import AuthorizationAttemptStore
+    from app.desktop_session import DesktopLaunchTokenStore
+    from app.web import RuntimeContext
+
+    monkeypatch.setattr(web, "APP_VERSION", "8.7.6", raising=False)
+    with client(tmp_path) as browser:
+        assert "id='data-settings-dialog'" not in browser.get("/").text
+    settings = Settings(
+        _env_file=None,
+        runtime_mode="desktop",
+        eve_client_id="public",
+        app_session_secret="s" * 48,
+        app_encryption_key=Fernet.generate_key().decode(),
+    )
+    db = Database(tmp_path / "desktop.sqlite3")
+    services = AppServices(
+        CharacterRepository(db),
+        CharacterGroupRepository(db),
+        JournalRepository(db),
+        None,
+        None,
+        None,
+    )
+    runtime = RuntimeContext(
+        "desktop", AuthorizationAttemptStore(), DesktopLaunchTokenStore()
+    )
+    with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
+        page = browser.get("/").text
+    assert "V8.7" in page and "V8.7.6" in page
+    assert "<dialog id='data-settings-dialog'" in page
+    assert "aria-labelledby='data-settings-title'" in page
+    for label in (
+        "数据存储",
+        "数据库",
+        "日志",
+        "备份",
+        "WebView",
+        "总占用",
+        "原数据目录",
+        "七天",
+        "三次",
+    ):
+        assert label in page
+    assert "id='storage-create-recovery' type='checkbox' checked" in page
+    assert "id='storage-error'" in page and "role='alert'" in page
+
+
+def test_storage_javascript_flow_focus_failures_and_byte_formatting():
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js required for executable frontend contract")
+    script = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+class Element {
+  constructor(id) { this.id = id; this.listeners = {}; this.disabled = false; this.hidden = false;
+    this.textContent = ''; this.checked = true; this.open = false; this.dataset = {}; this.className = ''; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  setAttribute(name, value) { this[name] = value; }
+  removeAttribute(name) { delete this[name]; }
+  focus() { document.activeElement = this; }
+  showModal() { this.open = true; }
+  close() { this.open = false; this.listeners.close?.(); }
+  async fire(name = 'click') { return this.listeners[name]?.({preventDefault() {}, currentTarget: this, key: 'Escape'}); }
+}
+const nodes = new Map();
+const element = id => { if (!nodes.has(id)) nodes.set(id, new Element(id)); return nodes.get(id); };
+global.document = { getElementById: element, querySelector: () => ({content: 'csrf-known'}),
+  querySelectorAll: () => [], body: {dataset: {runtimeMode:'desktop', authenticated:'true'}},
+  addEventListener() {}, activeElement: element('settings-button') };
+const calls = [];
+let failure = null, selected = 'E:/', pending = false;
+const status = {current_path:'D:/<unsafe>', volume:'D:', usage:{database:100, logs:20, backups:30,
+  webview:10, config:5, other:5, recovery:40, total:210},
+  recovery:{created_at:'2026-10-01T00:00:00Z', size_bytes:40, successful_starts:2,
+  retention_days:7, required_starts:3}, pending_migration:false, pending_cleanup:false, busy:false};
+global.window = {pywebview:{api:{
+  async choose_data_parent() { calls.push('picker'); return selected; },
+  async open_data_directory() { calls.push('open'); return true; },
+  async restart_for_migration() { assert.equal(pending,true); calls.push('restart'); return true; }
+}}};
+global.fetch = async (path, options={}) => {
+  calls.push([path, options]);
+  if (options.method && options.method !== 'GET') assert.equal(options.headers['X-CSRF-Token'], 'csrf-known');
+  if (failure && path.endsWith(failure)) return {ok:false,json:async()=>({error:{message:'持久错误'}})};
+  let data = status;
+  if (path.endsWith('/estimate')) {
+    const payload=JSON.parse(options.body); assert.equal(payload.target_parent,'E:/');
+    data={target_path:'E:/EVE Income Tracker', copy_bytes:100,recovery_bytes:payload.create_recovery?40:0,
+      free_bytes:200000,space_sufficient:true};
+  }
+  if (path.endsWith('/migrations')) { pending=true; data={scheduled:true,target_path:'E:/EVE Income Tracker'}; }
+  if (path.endsWith('/recovery')) data={freed_bytes:40};
+  return {ok:true,json:async()=>data};
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+(async () => {
+  assert.equal(formatBytes(-1), '—'); assert.equal(formatBytes(NaN), '—');
+  assert.equal(formatBytes('123'), '—'); assert.equal(formatBytes(1024), '1.0 KiB');
+  assert.equal(formatBytes(0), '0 B');
+  bindDataSettings();
+  await element('settings-button').fire();
+  assert.equal(element('data-settings-dialog').open,true);
+  assert.equal(document.activeElement.id,'data-settings-close');
+  assert.equal(element('storage-current-path').textContent,'D:/<unsafe>');
+  await element('storage-open').fire();
+  assert(calls.includes('open'));
+  selected=null;
+  await element('storage-change').fire();
+  assert.equal(calls.filter(x=>Array.isArray(x)&&x[0].endsWith('/estimate')).length,0);
+  selected='E:/';
+  await element('storage-change').fire();
+  assert.equal(element('storage-confirmation').hidden,false);
+  assert.equal(element('storage-target-path').textContent,'E:/EVE Income Tracker');
+  assert.equal(document.activeElement.id,'storage-confirm');
+  element('storage-create-recovery').checked=false;
+  await element('storage-create-recovery').fire('change');
+  assert.equal(element('storage-recovery-bytes').textContent,'0 B');
+  failure='/migrations';
+  await element('storage-confirm').fire();
+  assert.equal(calls.includes('restart'),false);
+  assert.equal(element('storage-error').hidden,false);
+  assert.equal(element('storage-error').textContent,'持久错误');
+  assert.equal(element('storage-confirm').disabled,false);
+  failure=null;
+  await element('storage-confirm').fire();
+  assert.equal(calls.at(-1),'restart');
+  element('data-settings-dialog').close();
+  assert.equal(document.activeElement.id,'settings-button');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+    result = subprocess.run(
+        [node, "-e", script, str(Path(__file__).parents[1] / "app/static/app.js")],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

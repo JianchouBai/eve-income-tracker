@@ -23,6 +23,10 @@
         </div>
       </div>
       <div class='masthead-action'>
+        <span class='system-state'>V{{ short_version }}</span>
+        {% if runtime_mode == "desktop" %}
+        <button id='settings-button' type='button' aria-haspopup='dialog' aria-controls='data-settings-dialog'>设置</button>
+        {% endif %}
         <span class='system-state'><i aria-hidden='true'></i>本地只读监控</span>
         {% if configuration_issues %}
         <span id='add-role-link' class='button button-disabled'>完成配置后可登录</span>
@@ -179,6 +183,58 @@
       </div>
     </section>
   </main>
+
+  {% if runtime_mode == "desktop" %}
+  <dialog id='data-settings-dialog' class='data-settings' aria-labelledby='data-settings-title'>
+    <div class='panel-heading'>
+      <div><span class='section-index'>设置</span><h2 id='data-settings-title'>数据存储</h2></div>
+      <button id='data-settings-close' type='button' autofocus aria-label='关闭设置'>关闭</button>
+    </div>
+    <p id='storage-error' class='notice error' role='alert' hidden></p>
+    <p id='storage-status' role='status' aria-live='polite'></p>
+    <dl class='storage-facts'>
+      <dt>当前完整路径</dt><dd id='storage-current-path'>—</dd>
+      <dt>所在卷</dt><dd id='storage-volume'>—</dd>
+      <dt>数据库</dt><dd id='storage-database'>—</dd>
+      <dt>日志</dt><dd id='storage-logs'>—</dd>
+      <dt>备份</dt><dd id='storage-backups'>—</dd>
+      <dt>WebView 用户数据</dt><dd id='storage-webview'>—</dd>
+      <dt>配置</dt><dd id='storage-config'>—</dd>
+      <dt>其他</dt><dd id='storage-other'>—</dd>
+      <dt>迁移恢复副本</dt><dd id='storage-recovery-usage'>—</dd>
+      <dt>总占用</dt><dd id='storage-total'>—</dd>
+    </dl>
+    <section aria-labelledby='storage-recovery-title'>
+      <h3 id='storage-recovery-title'>迁移恢复副本</h3>
+      <p id='storage-recovery-details'>正在读取…</p>
+      <p class='field-guidance'>最多保留一份；新位置连续成功启动至少三次，且副本已满七天后自动删除。副本保存在目标数据盘。</p>
+      <button id='storage-delete-recovery' type='button' disabled>立即删除迁移恢复副本</button>
+    </section>
+    <div class='storage-actions'>
+      <button id='storage-open' type='button' disabled>打开数据目录</button>
+      <button id='storage-change' class='button button-primary' type='button' disabled>更改存储位置</button>
+      <button id='storage-restart' type='button' hidden>重启并完成迁移</button>
+    </div>
+    <section id='storage-confirmation' class='storage-confirmation' aria-labelledby='storage-confirm-title' hidden>
+      <h3 id='storage-confirm-title'>确认更改存储位置</h3>
+      <dl class='storage-facts'>
+        <dt>最终目标目录</dt><dd id='storage-target-path'>—</dd>
+        <dt>数据迁移预计占用</dt><dd id='storage-copy-bytes'>—</dd>
+        <dt>恢复副本预计占用</dt><dd id='storage-recovery-bytes'>—</dd>
+        <dt>目标可用空间</dt><dd id='storage-free-bytes'>—</dd>
+      </dl>
+      <label class='storage-option'><input id='storage-create-recovery' type='checkbox' checked>创建迁移恢复副本（推荐）</label>
+      <p id='storage-space-warning' class='notice error' role='status' hidden>目标可用空间不足，请选择其他目录或取消创建恢复副本后重新估算。</p>
+      <p>迁移成功并验证新位置后，将清理迁移前的原数据目录，不保留第二套正式数据。若文件占用导致清理未完成，将在下次启动安全重试。迁移失败时保留原数据。</p>
+      <p class='field-guidance'>确认后应用将关闭窗口并重启，在重新打开数据前完成迁移。</p>
+      <div class='storage-actions'>
+        <button id='storage-confirm' class='button button-primary' type='button' disabled>确认并重启迁移</button>
+        <button id='storage-cancel' type='button'>取消更改</button>
+      </div>
+    </section>
+    <p class='storage-version'>关于 EVE 每日收益 · V{{ app_version }}</p>
+  </dialog>
+  {% endif %}
   <script src='/static/app.js' defer></script>
 </body>
 </html>
