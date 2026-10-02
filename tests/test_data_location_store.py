@@ -332,3 +332,55 @@ def test_pending_cleanup_parser_normalizes_dot_and_separators_lexically(tmp_path
     assert WindowsDataLocationStore(backend).read_pending_cleanup() == PendingCleanup(
         pending
     )
+
+
+@pytest.mark.parametrize("stop", range(3))
+def test_pending_migration_write_commits_target_last(tmp_path, stop):
+    backend = Backend()
+    store = WindowsDataLocationStore(backend)
+    pending = PendingMigration(tmp_path / "target", False)
+    backend.fail_after = stop
+    if stop < 2:
+        with pytest.raises(OSError):
+            store.write_pending_migration(pending)
+        assert store.read_pending_migration() is None
+    else:
+        store.write_pending_migration(pending)
+        assert store.read_pending_migration() == pending
+    backend.fail_after = None
+    store.clear_pending_migration()
+    store.write_pending_migration(pending)
+    assert store.read_pending_migration() == pending
+
+
+@pytest.mark.parametrize("stop", range(3))
+def test_pending_migration_clear_readable_at_every_boundary(tmp_path, stop):
+    backend = Backend()
+    store = WindowsDataLocationStore(backend)
+    pending = PendingMigration(tmp_path / "target", True)
+    store.write_pending_migration(pending)
+    backend.fail_delete_after = stop
+    if stop < 2:
+        with pytest.raises(OSError):
+            store.clear_pending_migration()
+    else:
+        store.clear_pending_migration()
+    assert store.read_pending_migration() == (pending if stop == 0 else None)
+    backend.fail_delete_after = None
+    store.clear_pending_migration()
+    store.clear_pending_migration()
+    assert store.read_pending_migration() is None
+    assert PENDING_MIGRATION_TARGET not in backend.values
+    assert "PendingMigrationCreateRecovery" not in backend.values
+
+
+def test_pending_migration_recovery_residue_is_uncommitted_but_target_requires_recovery(
+    tmp_path,
+):
+    backend = Backend()
+    store = WindowsDataLocationStore(backend)
+    backend.values["PendingMigrationCreateRecovery"] = ("incomplete residue", REG_SZ)
+    assert store.read_pending_migration() is None
+    backend.values.clear()
+    backend.values[PENDING_MIGRATION_TARGET] = (str(tmp_path / "target"), REG_SZ)
+    invalid(store.read_pending_migration)

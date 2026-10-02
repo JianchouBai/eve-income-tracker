@@ -35,7 +35,9 @@ from app.data_roots import (
     _reject_reparse_components,
     _reject_reparse_tree,
     _reject_unsafe_root,
+    data_root_from_parent,
     read_data_root_marker,
+    relocate_existing_data_root,
     validate_existing_data_root,
     validate_new_data_root,
     write_data_root_marker,
@@ -171,16 +173,26 @@ class DataLocationController:
 
     @_safe_operation
     def reconnect_existing(self, root: Path) -> DataRootReference:
-        marker = read_data_root_marker(root)
         current = self._store.read_current()
-        if current is not None and marker.reference.root_id != current.root_id:
-            raise DataLocationError("marker_mismatch")
-        self._validate(marker.reference)
         pending = self._store.read_pending_cleanup()
-        if pending is not None and pending.reference.root == marker.reference.root:
+        if pending is not None and pending.reference.root == root.resolve():
             raise DataLocationError("cleanup_pending")
-        self._switch(marker.reference)
-        return marker.reference
+        try:
+            reference = read_data_root_marker(root).reference
+        except DataRootValidationError as exc:
+            if exc.code != "marker_mismatch" or current is None:
+                raise
+            reference = relocate_existing_data_root(
+                root,
+                current,
+                resource_root=self._resource_root,
+                existing_validator=self._validate_contents,
+            )
+        if current is not None and reference.root_id != current.root_id:
+            raise DataLocationError("marker_mismatch")
+        self._validate(reference)
+        self._switch(reference)
+        return reference
 
     def _new_marker(self, root: Path) -> DataRootMarker:
         reference = DataRootReference(root, uuid4().hex, 1)
@@ -323,16 +335,28 @@ class DataLocationController:
 
     @_safe_operation
     def execute_pending_migration(self) -> MigrationResult | None:
-        if (
-            self._store.read_pending_migration() is None
-            and self._store.read_pending_cleanup() is None
-        ):
-            return None
-        current = self._current()
-        # Never authorize deletion from an unvalidated replacement root.
-        self._validate(current)
-        self._migration.retry_pending_cleanup()
         pending = self._store.read_pending_migration()
+        if pending is None:
+            # Retire recovery-only residue from an interrupted write/clear.
+            self._store.clear_pending_migration()
+            if self._store.read_pending_cleanup() is None:
+                return None
+        current = self._current()
+        # Never authorize deletion or retire a request from an invalid root.
+        self._validate(current)
+        if pending is not None:
+            _reject_reparse_components(pending.target_parent)
+            target = data_root_from_parent(pending.target_parent)
+            if current.root == target:
+                # A crash can leave a committed selection with either journal
+                # still pending. Complete these before touching the old root.
+                self._store.finalize_current_switch()
+                if self._store.read_current() != current:
+                    raise DataLocationError("registry_state_unknown")
+                self._store.clear_pending_migration()
+                self._migration.retry_pending_cleanup()
+                return None
+        self._migration.retry_pending_cleanup()
         if pending is None:
             return None
         if self._store.read_pending_cleanup() is not None:

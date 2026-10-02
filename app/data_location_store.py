@@ -292,11 +292,11 @@ class WindowsDataLocationStore:
 
     def read_pending_migration(self) -> PendingMigration | None:
         target = self.backend.read(PENDING_MIGRATION_TARGET)
-        recovery = self.backend.read(PENDING_MIGRATION_CREATE_RECOVERY)
-        if target is recovery is None:
-            return None
+        # Target is the commit field: recovery-only residue from an interrupted
+        # write/clear never authorizes a migration.
         if target is None:
-            raise DataLocationStoreError("registry_invalid")
+            return None
+        recovery = self.backend.read(PENDING_MIGRATION_CREATE_RECOVERY)
         create_recovery = _dword(recovery, (0, 1))
         return PendingMigration(_path(*target), bool(create_recovery))
 

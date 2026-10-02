@@ -522,3 +522,282 @@ def test_failed_pending_migration_keeps_original_and_request(tmp_path):
     assert paths.key_path.read_bytes() == b"protected-key"
     assert store.read_pending_migration().target_parent == parent
     assert (target / "foreign").read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "PreviousDataRoot",
+        "PendingMigrationTarget",
+        "PendingMigrationCreateRecovery",
+    ],
+)
+def test_restart_reconciles_committed_migration_without_migrating_again(
+    tmp_path, monkeypatch, field
+):
+    from app.data_migration import DataMigrationService
+
+    paths, original = existing(tmp_path)
+    parent = tmp_path / "target"
+    parent.mkdir()
+    store = MemoryDataLocationStore()
+    select(store, original)
+    controller = make_controller(tmp_path, store)
+    controller.schedule_migration(parent, create_recovery=False)
+    real_delete = store.backend.delete
+
+    def fail(name):
+        committed = "CurrentSwitchCommitted" in store.backend.values
+        if (
+            name == field
+            and name in store.backend.values
+            and (field != "PreviousDataRoot" or committed)
+        ):
+            raise OSError("private commit cleanup failure")
+        real_delete(name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store.backend, "delete", fail)
+        with pytest.raises(DataLocationError):
+            controller.execute_pending_migration()
+    selected = store.read_current()
+    assert selected.root == parent / "EVE Income Tracker"
+    assert paths.database_path.is_file()
+
+    def no_second_migration(*args, **kwargs):
+        pytest.fail("committed migration attempted again")
+
+    monkeypatch.setattr(DataMigrationService, "migrate", no_second_migration)
+    restarted = make_controller(tmp_path, store)
+    assert restarted.resolve_startup(paths.data_root, Interaction()) == selected
+    assert restarted.execute_pending_migration() is None
+    assert restarted.execute_pending_migration() is None
+    assert store.read_current() == selected
+    assert store.read_pending_migration() is None
+    assert store.read_pending_cleanup() is None
+    assert "PendingMigrationCreateRecovery" not in store.backend.values
+    assert not paths.data_root.exists()
+    assert (selected.root / "config/local.key").read_bytes() == b"protected-key"
+
+
+def test_completed_request_must_retire_before_cleanup(tmp_path, monkeypatch):
+    from app.data_location_store import PendingMigration
+
+    _, current = existing(tmp_path, "current")
+    paths, old = existing(tmp_path, "old")
+    store = MemoryDataLocationStore()
+    select(store, current)
+    store.write_pending_cleanup(PendingCleanup(old))
+    request = PendingMigration(current.root.parent, False)
+    store.write_pending_migration(request)
+
+    def fail():
+        raise OSError("private pending clear failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "clear_pending_migration", fail)
+        with pytest.raises(DataLocationError):
+            make_controller(tmp_path, store).execute_pending_migration()
+    assert paths.database_path.is_file()
+    assert store.read_pending_migration() == request
+    assert make_controller(tmp_path, store).execute_pending_migration() is None
+    assert store.read_pending_migration() is None
+    assert not paths.data_root.exists()
+
+
+def test_completed_request_with_invalid_current_preserves_request_and_old_data(
+    tmp_path,
+):
+    from app.data_location_store import PendingMigration
+
+    paths, current = existing(tmp_path, "current")
+    old_paths, old = existing(tmp_path, "old")
+    store = MemoryDataLocationStore()
+    select(store, current)
+    request = PendingMigration(current.root.parent, False)
+    store.write_pending_migration(request)
+    store.write_pending_cleanup(PendingCleanup(old))
+    paths.database_path.write_bytes(b"invalid private database")
+    with pytest.raises(DataLocationError):
+        make_controller(tmp_path, store).execute_pending_migration()
+    assert store.read_pending_migration() == request
+    assert store.read_pending_cleanup() == PendingCleanup(old)
+    assert old_paths.database_path.is_file()
+
+
+def relocated_source(tmp_path):
+    _, original = existing(tmp_path, "old")
+    store = MemoryDataLocationStore()
+    select(store, original)
+    marker_bytes = (original.root / MARKER_NAME).read_bytes()
+    moved_parent = tmp_path / "relocated"
+    original.root.parent.rename(moved_parent)
+    return original, moved_parent / "EVE Income Tracker", store, marker_bytes
+
+
+def test_locate_actual_parent_rename_rebinds_only_after_content_validation(tmp_path):
+    from app.data_roots import (
+        DataRootValidationError,
+        remove_owned_data_root,
+        validate_existing_data_root,
+    )
+
+    original, moved, store, marker_bytes = relocated_source(tmp_path)
+    selected = DataRootReference(moved, original.root_id, original.schema)
+    assert (moved / MARKER_NAME).read_bytes() == marker_bytes
+    with pytest.raises(DataRootValidationError, match="marker_mismatch"):
+        validate_existing_data_root(selected, resource_root=tmp_path / "program")
+    with pytest.raises(DataRootValidationError, match="marker_mismatch"):
+        remove_owned_data_root(selected)
+    before = (moved / "data/eve_income.sqlite3").read_bytes()
+    controller = make_controller(tmp_path, store)
+    result = controller.resolve_startup(
+        tmp_path / "local/EVE Income Tracker",
+        Interaction(actions=["locate"], roots=[moved]),
+    )
+    assert result == selected == store.read_current()
+    marker = read_data_root_marker(moved)
+    assert marker.reference == selected
+    assert marker.created_at == "2026-10-02T00:00:00Z"
+    assert marker.state == "ready"
+    assert (moved / "data/eve_income.sqlite3").read_bytes() == before
+    assert (moved / "config/local.key").read_bytes() == b"protected-key"
+    assert controller.reconnect_existing(moved) == selected
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "root_id",
+        "old_root",
+        "app_id",
+        "schema",
+        "incomplete",
+        "database",
+        "key",
+        "unsafe",
+    ],
+)
+def test_relocation_rejects_untrusted_identity_or_contents_without_rewrite(
+    tmp_path, damage
+):
+    import json
+
+    original, moved, store, _ = relocated_source(tmp_path)
+    marker_path = moved / MARKER_NAME
+    if damage in ("root_id", "old_root", "app_id", "schema", "incomplete"):
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+        field, value = {
+            "root_id": ("root_id", uuid4().hex),
+            "old_root": ("root", str(tmp_path / "foreign/EVE Income Tracker")),
+            "app_id": ("app_id", "wrong-app"),
+            "schema": ("schema", 2),
+            "incomplete": ("state", "incomplete"),
+        }[damage]
+        payload[field] = value
+        marker_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif damage == "database":
+        (moved / "data/eve_income.sqlite3").write_bytes(b"private invalid database")
+    elif damage == "key":
+        (moved / "config/local.key").unlink()
+    else:
+        unsafe = tmp_path / "program/EVE Income Tracker"
+        unsafe.parent.mkdir()
+        moved.rename(unsafe)
+        moved = unsafe
+        marker_path = moved / MARKER_NAME
+    before = marker_path.read_bytes()
+    with pytest.raises(DataLocationError) as caught:
+        make_controller(tmp_path, store).reconnect_existing(moved)
+    assert "private" not in str(caught.value)
+    assert marker_path.read_bytes() == before
+    assert store.read_current() == original
+
+
+def test_relocation_marker_write_failure_preserves_old_binding_and_can_retry(
+    tmp_path, monkeypatch
+):
+    from app import data_roots
+
+    original, moved, store, before = relocated_source(tmp_path)
+
+    def fail(*args):
+        raise OSError("private marker write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(data_roots.os, "replace", fail)
+        with pytest.raises(DataLocationError, match="marker_write_failed"):
+            make_controller(tmp_path, store).reconnect_existing(moved)
+    assert (moved / MARKER_NAME).read_bytes() == before
+    assert store.read_current() == original
+    expected = DataRootReference(moved, original.root_id, original.schema)
+    assert make_controller(tmp_path, store).reconnect_existing(moved) == expected
+
+
+@pytest.mark.parametrize("phase", ["begin", "finalize"])
+def test_relocation_registry_failure_leaves_rebound_marker_retryable(
+    tmp_path, monkeypatch, phase
+):
+    original, moved, store, _ = relocated_source(tmp_path)
+    expected = DataRootReference(moved, original.root_id, original.schema)
+    real_begin = store.begin_current_switch
+    real_delete = store.backend.delete
+
+    def fail_begin(reference):
+        real_begin(reference)
+        raise OSError("private registry write failure")
+
+    def fail_finalize(name):
+        if (
+            name == "PreviousDataRoot"
+            and "CurrentSwitchCommitted" in store.backend.values
+        ):
+            raise OSError("private registry finalize failure")
+        real_delete(name)
+
+    with monkeypatch.context() as patch:
+        if phase == "begin":
+            patch.setattr(store, "begin_current_switch", fail_begin)
+        else:
+            patch.setattr(store.backend, "delete", fail_finalize)
+        with pytest.raises(DataLocationError, match="registry_"):
+            make_controller(tmp_path, store).reconnect_existing(moved)
+    assert read_data_root_marker(moved).reference == expected
+    assert store.read_current() == (original if phase == "begin" else expected)
+    controller = make_controller(tmp_path, store)
+    assert (
+        controller.resolve_startup(
+            tmp_path / "local/EVE Income Tracker",
+            Interaction(actions=["locate"], roots=[moved]),
+        )
+        == expected
+    )
+    assert store.read_current() == expected
+
+
+def test_relocation_rejects_reparse_selected_parent_without_rewriting(tmp_path):
+    import os
+    import subprocess
+
+    original, moved, store, before = relocated_source(tmp_path)
+    alias = tmp_path / "alias"
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(moved.parent)],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        alias.symlink_to(moved.parent, target_is_directory=True)
+    try:
+        with pytest.raises(DataLocationError, match="path_reparse"):
+            make_controller(tmp_path, store).reconnect_existing(
+                alias / "EVE Income Tracker"
+            )
+        assert (moved / MARKER_NAME).read_bytes() == before
+        assert store.read_current() == original
+    finally:
+        if os.name == "nt":
+            alias.rmdir()
+        else:
+            alias.unlink()

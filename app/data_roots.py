@@ -7,6 +7,7 @@ import os
 import stat
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -249,6 +250,62 @@ def _read_data_root_marker_at(directory: Path, expected_root: Path) -> DataRootM
 
 def read_data_root_marker(root: Path) -> DataRootMarker:
     return _read_data_root_marker_at(root, root)
+
+
+def relocate_existing_data_root(
+    selected_root: Path,
+    registered: DataRootReference,
+    *,
+    resource_root: Path,
+    existing_validator: Callable[[AppPaths], None],
+) -> DataRootReference:
+    """Rebind only the registered ready identity after an explicit locate action.
+
+    Ordinary reads/deletion remain path-bound. A failed registry switch after
+    this atomic rewrite must leave the new binding intact for a later retry.
+    """
+    old_root = _validate_reference(registered)
+    _reject_unsafe_root(old_root, resource_root.resolve(strict=False))
+    _reject_reparse_components(selected_root)
+    root = _canonical(selected_root, reject_traversal=True)
+    _reject_unsafe_root(root, resource_root.resolve(strict=False))
+    if not root.is_dir():
+        raise DataRootValidationError("path_unavailable")
+    marker = _read_data_root_marker_at(root, old_root)
+    expected = DataRootReference(old_root, registered.root_id, registered.schema)
+    if marker.reference != expected:
+        raise DataRootValidationError("marker_mismatch")
+    if marker.state != "ready":
+        raise DataRootValidationError("marker_incomplete")
+    _reject_reparse_tree(root)
+    identity = _directory_identity(root)
+    paths = resolve_app_paths(frozen=True, bundle_root=resource_root, data_root=root)
+    if (
+        not paths.database_path.is_file()
+        or not paths.database_path.stat().st_size
+        or not paths.key_path.is_file()
+        or not paths.key_path.stat().st_size
+    ):
+        raise DataRootValidationError("existing_data_invalid")
+    try:
+        with tempfile.TemporaryFile(dir=root):
+            pass
+    except OSError:
+        raise DataRootValidationError("path_not_writable") from None
+    existing_validator(paths)
+    # Recheck the selected directory and old-bound marker before replacing any
+    # metadata; validation must not authorize a changed root or changed marker.
+    _reject_reparse_components(root)
+    _reject_reparse_tree(root)
+    if _directory_identity(root) != identity:
+        raise DataRootValidationError("root_identity_changed")
+    if _read_data_root_marker_at(root, old_root) != marker:
+        raise DataRootValidationError("marker_mismatch")
+    reference = DataRootReference(root, registered.root_id, registered.schema)
+    write_data_root_marker(
+        root, DataRootMarker(reference, marker.created_at, marker.state)
+    )
+    return reference
 
 
 def validate_existing_data_root(
