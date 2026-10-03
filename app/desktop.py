@@ -44,6 +44,7 @@ from app.paths import (
 from app.security import validate_fernet_key
 from app.storage import LATEST_SCHEMA_VERSION, Database
 from app.uninstall_cleanup import cleanup_uninstall_data
+from app.version import APP_VERSION
 from app.web import RuntimeContext
 from app.windows_runtime import (
     APP_TITLE,
@@ -172,7 +173,7 @@ def _smoke_release_config() -> ReleaseConfig:
     return ReleaseConfig(
         eve_client_id="desktop-smoke-public-client",
         eve_callback_url=CALLBACK_URL,
-        eve_user_agent="eve-income-tracker/0.1 (smoke@example.com)",
+        eve_user_agent=f"eve-income-tracker/{APP_VERSION} (smoke@example.com)",
         esi_compatibility_date="2026-05-19",
     )
 

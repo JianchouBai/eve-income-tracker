@@ -293,6 +293,51 @@ def test_readme_documents_private_local_files_never_enter_git():
     assert "不会进入 Git" in readme
 
 
+def test_readme_documents_selected_storage_and_recovery_contract():
+    installed = read_readme().split("## 开发与维护", 1)[0]
+    assert "安装版的个人数据根目录为：" not in installed
+    for statement in (
+        "首次启动",
+        "选择数据存储位置",
+        "默认位置",
+        "设置",
+        "迁移",
+        "离线",
+        "定位已有数据目录",
+        "恢复副本",
+        "七天",
+        "三次",
+        "重装",
+        "默认保留个人数据",
+        "同时删除个人数据",
+        "不会进入 Git",
+    ):
+        assert statement in installed
+
+
+def test_changelog_records_completed_release_without_erasing_history():
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## 1.0.0（2026-10-01）" in changelog
+    assert "未发布（计划 v1.0.0）" not in changelog
+    assert "## 0.1.0（2026-09-30）" in changelog
+
+
+def test_windows_release_checklist_covers_configurable_storage_paths():
+    checklist = (ROOT / "docs" / "windows-release-checklist.md").read_text(
+        encoding="utf-8"
+    )
+    for statement in (
+        "C→D",
+        "D→测试卷",
+        "离线",
+        "恢复副本",
+        "默认保留",
+        "明确删除",
+        "重装接回",
+    ):
+        assert statement in checklist
+
+
 def test_windows_release_checklist_covers_desktop_acceptance_contract():
     checklist_path = ROOT / "docs" / "windows-release-checklist.md"
     assert checklist_path.is_file()
