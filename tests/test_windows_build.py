@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -203,6 +204,53 @@ def test_installer_metadata_is_supplied_by_build_and_output_is_versioned():
     assert 'Source: "{#MySourceDir}\\*"' in script
     assert "recursesubdirs createallsubdirs" in script
 
+
+def test_installer_compiles_with_inno_setup_when_available(tmp_path):
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    candidates = [
+        shutil.which("ISCC.exe"),
+        *(Path(base) / "Inno Setup 7" / "ISCC.exe" for base in (
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+        ) if base),
+    ]
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "Programs" / "Inno Setup 7" / "ISCC.exe")
+    compiler = next((Path(path) for path in candidates if path and Path(path).is_file()), None)
+    if compiler is None:
+        pytest.skip("Inno Setup 7 is unavailable")
+
+    from scripts.generate_windows_icon import generate_windows_icon
+
+    fixture = tmp_path / "安装 fixture with spaces"
+    source = fixture / "source"
+    output = fixture / "output"
+    source.mkdir(parents=True)
+    output.mkdir()
+    (source / "EVE Income Tracker.exe").write_bytes(b"disposable test payload")
+    bootstrapper = fixture / "MicrosoftEdgeWebview2Setup.exe"
+    bootstrapper.write_bytes(b"disposable test payload")
+    icon = generate_windows_icon(ROOT / "assets" / "app-icon.svg", fixture / "app.ico")
+
+    result = subprocess.run(
+        [
+            str(compiler),
+            "/DMyAppVersion=1.0.0",
+            f"/DMySourceDir={source}",
+            f"/DMyOutputDir={output}",
+            f"/DMyWebView2Bootstrapper={bootstrapper}",
+            f"/DMyIcon={icon}",
+            str(ISS),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (output / "EVE-Income-Tracker-1.0.0-x64-Setup.exe").is_file()
 
 def test_build_pipeline_has_fail_fast_release_gates_and_scoped_cleanup():
     script = read(BUILD)

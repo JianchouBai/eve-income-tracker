@@ -453,6 +453,6 @@ begin
     Exit;
   end;
   Log('Data directory was not fully removed: ' + UserDataRoot);
-  MsgBox('个人数据目录未能完全删除，位置记录已保留，请稍后手动处理：' +
-    #13#10 + UserDataRoot, mbError, MB_OK);
+  MsgBox('个人数据目录未能完全删除，位置记录已保留，请稍后手动处理：' + #13#10 +
+    UserDataRoot, mbError, MB_OK);
 end;
