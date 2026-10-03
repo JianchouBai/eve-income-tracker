@@ -338,6 +338,58 @@ def test_windows_release_checklist_covers_configurable_storage_paths():
         assert statement in checklist
 
 
+def test_windows_release_checklist_verifies_failed_migration_rollback():
+    checklist = (ROOT / "docs" / "windows-release-checklist.md").read_text(
+        encoding="utf-8"
+    )
+    assert any(
+        all(
+            term in item
+            for term in ("故障注入", "迁移失败", "注册表指针", "原数据目录", "仍可启动")
+        )
+        for item in checklist.split("- [ ] ")
+    )
+
+
+def test_windows_release_checklist_verifies_settings_storage_status():
+    checklist = (ROOT / "docs" / "windows-release-checklist.md").read_text(
+        encoding="utf-8"
+    )
+    assert any(
+        all(
+            term in item
+            for term in (
+                "设置",
+                "当前路径",
+                "所在磁盘",
+                "占用",
+                "数据库",
+                "日志",
+                "备份",
+            )
+        )
+        for item in checklist.split("- [ ] ")
+    )
+
+
+def test_windows_release_checklist_requires_isolated_destructive_acceptance():
+    checklist = (ROOT / "docs" / "windows-release-checklist.md").read_text(
+        encoding="utf-8"
+    )
+    preamble = checklist.split("## 构建前", 1)[0]
+    for term in (
+        "所有破坏性验收步骤",
+        "可丢弃的测试数据",
+        "隔离的测试卷",
+        "真实钱包数据库",
+        "迁移",
+        "故障注入",
+        "恢复副本删除",
+        "卸载删除",
+    ):
+        assert term in preamble
+
+
 def test_windows_release_checklist_covers_desktop_acceptance_contract():
     checklist_path = ROOT / "docs" / "windows-release-checklist.md"
     assert checklist_path.is_file()
