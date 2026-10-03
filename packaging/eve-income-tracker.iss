@@ -172,6 +172,16 @@ var
   I: Integer;
 begin
   Result := False;
+  if Length(Value) = 32 then
+  begin
+    if (Value[13] <> '4') or (Pos(Value[17], '89ab') = 0) then
+      Exit;
+    for I := 1 to 32 do
+      if Pos(Value[I], '0123456789abcdef') = 0 then
+        Exit;
+    Result := True;
+    Exit;
+  end;
   if Length(Value) <> 36 then
     Exit;
   if (Value[15] <> '4') or

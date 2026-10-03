@@ -60,6 +60,35 @@ def test_uninstall_helper_deletes_only_owned_root_and_leaves_registry_for_inno(t
     assert store.backend.values == before
 
 
+def test_uninstall_helper_accepts_production_hex_uuid_v4(tmp_path):
+    cleanup = cleanup_function()
+    root, reference, store = prepared_root(tmp_path)
+    hex_id = reference.root_id.replace("-", "")
+    assert len(hex_id) == 32
+    write_data_root_marker(
+        root,
+        DataRootMarker(
+            DataRootReference(root, hex_id, 1), "2026-10-02T00:00:00Z", "ready"
+        ),
+    )
+    store.backend.write(DATA_ROOT_ID, hex_id, REG_SZ)
+
+    assert cleanup(str(root), hex_id, registry_backend=store.backend) == 0
+    assert not root.exists()
+
+
+def test_uninstall_helper_does_not_equate_uuid_spellings(tmp_path):
+    cleanup = cleanup_function()
+    root, reference, store = prepared_root(tmp_path)
+    hex_id = reference.root_id.replace("-", "")
+    store.backend.write(DATA_ROOT_ID, hex_id, REG_SZ)
+    before = dict(store.backend.values)
+
+    assert cleanup(str(root), hex_id, registry_backend=store.backend) == 2
+    assert (root / "wallet.txt").read_text(encoding="utf-8") == "keep"
+    assert store.backend.values == before
+
+
 @pytest.mark.parametrize(
     ("name", "value", "kind"),
     [

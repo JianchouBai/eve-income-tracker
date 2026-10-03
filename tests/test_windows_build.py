@@ -159,6 +159,17 @@ def test_installer_malicious_state_matrix_has_delete_guards(case, function, guar
     assert guard in _inno_function(script, function), case
 
 
+def test_installer_accepts_exact_production_hex_uuid_v4_format():
+    uuid = _inno_function(read(ISS), "IsUuidV4")
+
+    assert "if Length(Value) = 32 then" in uuid
+    assert "Value[13] <> '4'" in uuid
+    assert "Pos(Value[17], '89ab')" in uuid
+    assert "if Length(Value) <> 36 then" in uuid
+    assert "Value[15]" in uuid
+    assert "Value[20]" in uuid
+
+
 def test_installer_rejects_short_malformed_values_before_indexing():
     script = read(ISS)
     uuid = _inno_function(script, "IsUuidV4")

@@ -65,7 +65,7 @@ def cleanup_uninstall_data(
             or ".." in root.parts
             or str(root) != expected_root
             or root_uuid.version != 4
-            or str(root_uuid) != expected_id
+            or expected_id not in (str(root_uuid), root_uuid.hex)
         ):
             return 2
         backend = WindowsDataLocationStore(registry_backend).backend
