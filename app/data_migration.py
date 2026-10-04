@@ -29,6 +29,7 @@ from app.data_roots import (
     DataRootReference,
     DataRootValidationError,
     _directory_identity,
+    _read_data_root_marker_at,
     _reject_reparse_components,
     _reject_reparse_tree,
     _reject_unsafe_root,
@@ -218,12 +219,10 @@ class DataMigrationService:
         if _inventory(source) != (files, directories):
             raise DataMigrationError("file_verification_failed")
 
-    def _discard_staging(self, staging: Path, identity: tuple[int, int]) -> None:
-        _reject_reparse_components(staging)
-        if _directory_identity(staging) != identity:
-            raise DataMigrationError("cleanup_failed")
-        _reject_reparse_tree(staging)
-        delete_tree_bound(staging, identity)
+    def _discard_staging(
+        self, staging: Path, transaction: MigrationTransaction
+    ) -> None:
+        self._discard_transaction_path(staging, transaction, "staging")
 
     def _quarantine(
         self, root: Path, identity: tuple[int, int], operation_id: str
@@ -260,34 +259,63 @@ class DataMigrationService:
         )
         return staging, target, failed
 
-    def _discard_transaction_path(
-        self,
-        path: Path,
-        identity: tuple[int, int] | None,
-        *,
-        reference: DataRootReference | None = None,
-    ) -> None:
+    def _validate_transaction_path(
+        self, path: Path, transaction: MigrationTransaction, kind: str
+    ) -> bool:
         _reject_reparse_components(path)
         try:
             details = path.lstat()
         except FileNotFoundError:
-            return
+            return False
         if not stat.S_ISDIR(details.st_mode):
             raise DataMigrationError("cleanup_failed")
+        identity = transaction.staging_identity
         if identity is None:
-            try:
-                path.rmdir()
-            except OSError:
-                raise DataMigrationError("cleanup_failed") from None
-            return
+            if kind != "staging" or any(path.iterdir()):
+                raise DataMigrationError("cleanup_failed")
+            return True
         if _directory_identity(path) != identity:
             raise DataMigrationError("cleanup_failed")
-        if reference is not None:
-            marker = read_data_root_marker(path)
-            if marker.reference != reference:
+        marker_path = path / MARKER_NAME
+        try:
+            marker_path.lstat()
+        except FileNotFoundError:
+            if kind == "formal" or any(path.iterdir()):
+                raise DataMigrationError("cleanup_failed")
+        else:
+            marker = _read_data_root_marker_at(path, transaction.target.root)
+            if (
+                marker.reference != transaction.target
+                or marker.created_at != transaction.created_at
+            ):
                 raise DataMigrationError("cleanup_failed")
         _reject_reparse_tree(path)
-        delete_tree_bound(path, identity)
+        return True
+
+    def _discard_transaction_path(
+        self, path: Path, transaction: MigrationTransaction, kind: str
+    ) -> None:
+        if not self._validate_transaction_path(path, transaction, kind):
+            return
+        if transaction.staging_identity is None:
+            path.rmdir()  # Only the exact empty staging path before identity was saved.
+        else:
+            delete_tree_bound(
+                path, transaction.staging_identity, marker_last=MARKER_NAME
+            )
+
+    def _validate_empty_unowned_target(
+        self, target: Path, transaction: MigrationTransaction
+    ) -> None:
+        _reject_reparse_components(target)
+        details = target.lstat()
+        if (
+            not stat.S_ISDIR(details.st_mode)
+            or transaction.staging_identity is None
+            or _directory_identity(target) == transaction.staging_identity
+            or any(target.iterdir())
+        ):
+            raise DataMigrationError("cleanup_failed")
 
     def reconcile_interrupted_migration(self) -> bool:
         transaction = self._store.read_migration_transaction()
@@ -296,32 +324,62 @@ class DataMigrationService:
         staging, target, failed = self._transaction_paths(transaction)
         current = self._store.read_current()
         if current == transaction.source:
-            self._store.rollback_current_switch()
-            if self._store.read_current() != transaction.source:
-                raise DataMigrationError("registry_state_unknown")
+            source_paths = validate_existing_data_root(
+                transaction.source,
+                resource_root=self._resource_root,
+                require_writable=False,
+            )
+            self._destination_validator(source_paths)
+            _reject_reparse_components(target.parent)
+            parent_details = target.parent.stat(follow_symlinks=False)
+            if not stat.S_ISDIR(parent_details.st_mode):
+                raise DataMigrationError("cleanup_failed")
             pending_cleanup = self._store.read_pending_cleanup()
             if (
                 pending_cleanup is not None
                 and pending_cleanup.reference != transaction.source
             ):
                 raise DataMigrationError("registry_state_unknown")
-            self._store.clear_pending_cleanup()
-            present = []
-            for path in (staging, target, failed):
-                try:
-                    path.lstat()
-                except FileNotFoundError:
-                    continue
-                present.append(path)
-            if len(present) > 1:
+            has_staging = self._validate_transaction_path(
+                staging, transaction, "staging"
+            )
+            has_failed = self._validate_transaction_path(
+                failed, transaction, "diagnostic"
+            )
+            if has_staging and has_failed:
                 raise DataMigrationError("cleanup_failed")
-            if present:
-                path = present[0]
-                self._discard_transaction_path(
-                    path,
-                    transaction.staging_identity,
-                    reference=transaction.target if path == target else None,
+            try:
+                target.lstat()
+            except FileNotFoundError:
+                has_target = False
+            else:
+                has_target = True
+            formal = False
+            if has_target:
+                if has_failed:
+                    raise DataMigrationError("cleanup_failed")
+                formal = (
+                    not has_staging
+                    and transaction.staging_identity is not None
+                    and _directory_identity(target) == transaction.staging_identity
                 )
+                if formal:
+                    self._validate_transaction_path(target, transaction, "formal")
+                else:
+                    self._validate_empty_unowned_target(target, transaction)
+            self._store.rollback_current_switch()
+            if self._store.read_current() != transaction.source:
+                raise DataMigrationError("registry_state_unknown")
+            if formal:
+                # Windows rename refuses an existing destination. The operation
+                # journal remains live across the rename and every delete.
+                os.rename(target, failed)
+                self._discard_transaction_path(failed, transaction, "diagnostic")
+            elif has_staging:
+                self._discard_transaction_path(staging, transaction, "staging")
+            elif has_failed:
+                self._discard_transaction_path(failed, transaction, "diagnostic")
+            self._store.clear_pending_cleanup()
             self._store.clear_migration_transaction()
             return True
         if current == transaction.target:
@@ -482,7 +540,7 @@ class DataMigrationService:
                     if renamed:
                         self._quarantine(target, identity, transaction.operation_id)
                     else:
-                        self._discard_staging(staging, identity)
+                        self._discard_staging(staging, transaction)
                 except (OSError, ValueError, sqlite3.Error, RuntimeError):
                     raise DataMigrationError("cleanup_failed") from None
             if not renamed:
@@ -546,6 +604,12 @@ class DataMigrationService:
                 return True
             current = self._store.read_current()
             if current == pending.reference:
+                selected_paths = validate_existing_data_root(
+                    current,
+                    resource_root=self._resource_root,
+                    require_writable=False,
+                )
+                self._destination_validator(selected_paths)
                 self._store.clear_pending_cleanup()
                 return True
             if (

@@ -103,6 +103,26 @@ def test_migration_transaction_roundtrip_requires_durable_registry_value(tmp_pat
     assert WindowsDataLocationStore(backend).read_migration_transaction() is None
 
 
+@pytest.mark.parametrize("bad_field", ["source", "target"])
+@pytest.mark.parametrize("bad_value", [None, object()])
+def test_public_transaction_rejects_malformed_reference_with_stable_error(
+    tmp_path, bad_field, bad_value
+):
+    source = ref(tmp_path, "old")
+    target = ref(tmp_path, "new")
+    values = {"source": source, "target": target}
+    values[bad_field] = bad_value
+    record = MigrationTransaction(
+        1,
+        "7ad53c3e6fa34bd6a37a7b6ec3683f5f",
+        values["source"],
+        values["target"],
+        "2026-10-04T00:00:00Z",
+        None,
+    )
+    invalid(lambda: MemoryDataLocationStore().write_migration_transaction(record))
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

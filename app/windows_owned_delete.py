@@ -96,12 +96,16 @@ def _information(kernel, handle) -> _ByHandleInformation:
     return info
 
 
-def _delete_opened(kernel, path: Path, handle) -> None:
+def _delete_opened(
+    kernel, path: Path, handle, *, marker_last: str | None = None
+) -> None:
     try:
         info = _information(kernel, handle)
         if info.attributes & _FILE_ATTRIBUTE_DIRECTORY:
             with os.scandir(path) as entries:
                 children = [Path(entry.path) for entry in entries]
+            if marker_last is not None:
+                children.sort(key=lambda child: child.name == marker_last)
             for child in children:
                 child_handle = _open_bound_handle(kernel, child)
                 _delete_opened(kernel, child, child_handle)
@@ -117,7 +121,9 @@ def _delete_opened(kernel, path: Path, handle) -> None:
         kernel.CloseHandle(handle)
 
 
-def delete_tree_bound(root: Path, expected_identity: tuple[int, int]) -> None:
+def delete_tree_bound(
+    root: Path, expected_identity: tuple[int, int], *, marker_last: str | None = None
+) -> None:
     """Refuse a swapped root; hold each object until its own deletion is marked."""
     if os.name != "nt":
         raise OSError("Windows handle deletion is unavailable")
@@ -141,7 +147,7 @@ def delete_tree_bound(root: Path, expected_identity: tuple[int, int]) -> None:
         except (OSError, ValueError):
             kernel.CloseHandle(handle)
             raise
-        _delete_opened(kernel, root, handle)
+        _delete_opened(kernel, root, handle, marker_last=marker_last)
     finally:
         for ancestor_handle in reversed(ancestors):
             kernel.CloseHandle(ancestor_handle)

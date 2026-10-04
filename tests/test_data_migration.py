@@ -11,7 +11,7 @@ from zipfile import ZipFile
 
 import pytest
 
-from app import data_migration
+from app import data_migration, windows_owned_delete
 from app.data_location_store import (
     CURRENT_SWITCH_COMMITTED,
     DATA_ROOT,
@@ -27,6 +27,7 @@ from app.data_location_store import (
     PREVIOUS_DATA_ROOT_ID,
     PREVIOUS_DATA_ROOT_SCHEMA,
     MemoryDataLocationStore,
+    MigrationTransaction,
     PendingCleanup,
     PendingMigration,
     WindowsDataLocationStore,
@@ -36,9 +37,11 @@ from app.data_roots import (
     MARKER_NAME,
     DataRootMarker,
     DataRootReference,
+    DataRootValidationError,
     read_data_root_marker,
     validate_existing_data_root,
     write_data_root_marker,
+    write_staged_data_root_marker,
 )
 from app.migration_recovery import ARCHIVE_NAME, RecoverySnapshotService
 from app.paths import resolve_app_paths
@@ -113,6 +116,261 @@ class SimulatedProcessDeath(BaseException):
 def restarted_service(paths, store):
     restarted_store = WindowsDataLocationStore(store.backend)
     return restarted_store, service_for(paths, restarted_store)
+
+
+def record_attempt(
+    source, store, parent, *, location="staging", identity=True, marker=True
+):
+    target = DataRootReference(parent / "EVE Income Tracker", uuid4().hex, 1)
+    operation_id = uuid4().hex
+    transaction = MigrationTransaction(
+        1, operation_id, source, target, "2026-10-04T00:00:00Z", None
+    )
+    staging = parent / f".eve-income-tracker-migrating-{operation_id}"
+    diagnostic = parent / f".eve-income-tracker-failed-{operation_id}"
+    if location is not None:
+        staging.mkdir()
+        if identity:
+            transaction = MigrationTransaction(
+                transaction.version,
+                transaction.operation_id,
+                transaction.source,
+                transaction.target,
+                transaction.created_at,
+                data_migration._directory_identity(staging),
+            )
+        if marker:
+            write_staged_data_root_marker(
+                staging, DataRootMarker(target, transaction.created_at, "ready")
+            )
+        if location == "formal":
+            staging.rename(target.root)
+        elif location == "diagnostic":
+            staging.rename(diagnostic)
+    store.write_migration_transaction(transaction)
+    return transaction, staging, diagnostic
+
+
+@pytest.mark.parametrize("source_state", ["offline", "marker", "strict-validator"])
+def test_reconcile_keeps_attempt_when_selected_source_is_invalid(
+    tmp_path, source_state
+):
+    paths, source, store, parent = make_source(tmp_path)
+    transaction, _, _ = record_attempt(source, store, parent, location="formal")
+    target = transaction.target.root
+    (target / "attempt-bytes").write_bytes(b"keep")
+    if source_state == "offline":
+        paths.data_root.rename(paths.data_root.with_name("displaced-source"))
+    elif source_state == "marker":
+        (paths.data_root / MARKER_NAME).unlink()
+
+    def strict_validator(destination):
+        if destination.data_root == source.root:
+            raise ValueError("source cannot be reopened")
+
+    before_registry = store.backend.values.copy()
+    restarted_store = WindowsDataLocationStore(store.backend)
+    service = service_for(
+        paths,
+        restarted_store,
+        strict_validator if source_state == "strict-validator" else None,
+    )
+    with pytest.raises((DataMigrationError, DataRootValidationError, ValueError)):
+        service.reconcile_interrupted_migration()
+    assert store.backend.values == before_registry
+    assert (target / "attempt-bytes").read_bytes() == b"keep"
+    assert restarted_store.read_migration_transaction() == transaction
+
+
+def test_reconcile_keeps_transaction_when_target_parent_is_unavailable(tmp_path):
+    paths, source, store, parent = make_source(tmp_path)
+    transaction, _, _ = record_attempt(source, store, parent, location=None)
+    parent.rmdir()
+    before_registry = store.backend.values.copy()
+    restarted_store, service = restarted_service(paths, store)
+    with pytest.raises((DataMigrationError, DataRootValidationError, OSError)):
+        service.reconcile_interrupted_migration()
+    assert store.backend.values == before_registry
+    assert restarted_store.read_migration_transaction() == transaction
+    assert paths.key_path.read_bytes() == b"private protected key"
+
+
+def test_cleanup_current_reference_waits_until_selected_root_is_valid(tmp_path):
+    paths, source, store, _ = make_source(tmp_path)
+    store.write_pending_cleanup(PendingCleanup(source))
+    paths.data_root.rename(paths.data_root.with_name("displaced-source"))
+    restarted_store, service = restarted_service(paths, store)
+    assert service.retry_pending_cleanup() is False
+    assert restarted_store.read_pending_cleanup() == PendingCleanup(source)
+
+
+def test_reconcile_preserves_preexisting_empty_target_beside_staging(tmp_path):
+    paths, source, store, parent = make_source(tmp_path)
+    formal = parent / "EVE Income Tracker"
+    formal.mkdir()
+    formal_identity = data_migration._directory_identity(formal)
+    _, staging, _ = record_attempt(source, store, parent)
+    (staging / "attempt-bytes").write_bytes(b"discard")
+    restarted_store, service = restarted_service(paths, store)
+    assert service.reconcile_interrupted_migration() is True
+    assert restarted_store.read_migration_transaction() is None
+    assert data_migration._directory_identity(formal) == formal_identity
+    assert list(formal.iterdir()) == []
+    assert not staging.exists()
+    assert paths.key_path.read_bytes() == b"private protected key"
+
+
+@pytest.mark.parametrize("location", ["staging", "formal", "diagnostic"])
+@pytest.mark.parametrize("change", ["root-id", "created-at"])
+def test_reconcile_refuses_changed_attempt_marker(tmp_path, location, change):
+    paths, source, store, parent = make_source(tmp_path)
+    transaction, staging, diagnostic = record_attempt(
+        source, store, parent, location=location
+    )
+    attempt = (
+        staging
+        if location == "staging"
+        else transaction.target.root
+        if location == "formal"
+        else diagnostic
+    )
+    marker_path = attempt / MARKER_NAME
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["root_id" if change == "root-id" else "created_at"] = (
+        uuid4().hex if change == "root-id" else "2026-10-03T00:00:00Z"
+    )
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    (attempt / "attempt-bytes").write_bytes(b"keep")
+    restarted_store, service = restarted_service(paths, store)
+    with pytest.raises((DataMigrationError, DataRootValidationError)):
+        service.reconcile_interrupted_migration()
+    assert (attempt / "attempt-bytes").read_bytes() == b"keep"
+    assert restarted_store.read_migration_transaction() == transaction
+
+
+def test_reconcile_refuses_nonempty_markerless_diagnostic(tmp_path):
+    paths, source, store, parent = make_source(tmp_path)
+    transaction, _, diagnostic = record_attempt(
+        source, store, parent, location="diagnostic"
+    )
+    (diagnostic / MARKER_NAME).unlink()
+    (diagnostic / "foreign").write_bytes(b"keep")
+    restarted_store, service = restarted_service(paths, store)
+    with pytest.raises(DataMigrationError, match="cleanup_failed"):
+        service.reconcile_interrupted_migration()
+    assert (diagnostic / "foreign").read_bytes() == b"keep"
+    assert restarted_store.read_migration_transaction() == transaction
+
+
+@pytest.mark.parametrize("target_state", ["occupied", "replaced-formal"])
+def test_reconcile_refuses_foreign_target_and_preserves_bytes(tmp_path, target_state):
+    paths, source, store, parent = make_source(tmp_path)
+    transaction, staging, _ = record_attempt(
+        source,
+        store,
+        parent,
+        location="staging" if target_state == "occupied" else "formal",
+    )
+    target = transaction.target.root
+    if target_state == "occupied":
+        target.mkdir()
+    else:
+        target.rename(parent / "displaced-formal")
+    if target_state == "replaced-formal":
+        target.mkdir()
+    (target / "foreign").write_bytes(b"keep")
+    restarted_store, service = restarted_service(paths, store)
+    with pytest.raises(DataMigrationError, match="cleanup_failed"):
+        service.reconcile_interrupted_migration()
+    assert (target / "foreign").read_bytes() == b"keep"
+    assert restarted_store.read_migration_transaction() == transaction
+    if target_state == "occupied":
+        assert staging.is_dir()
+    else:
+        assert (parent / "displaced-formal" / MARKER_NAME).is_file()
+
+
+def test_failed_migration_does_not_discard_staging_with_changed_marker(
+    tmp_path, monkeypatch
+):
+    paths, source, store, parent = make_source(tmp_path)
+
+    def corrupt_marker_then_fail(_, source_paths, destination):
+        marker_path = destination.data_root / MARKER_NAME
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        marker["root_id"] = uuid4().hex
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+        (destination.data_root / "attempt-bytes").write_bytes(b"keep")
+        raise ValueError("copy failed after foreign replacement")
+
+    monkeypatch.setattr(DataMigrationService, "_copy", corrupt_marker_then_fail)
+    with pytest.raises(DataMigrationError, match="cleanup_failed"):
+        service_for(paths, store).migrate(source, parent, create_recovery=False)
+    transaction = store.read_migration_transaction()
+    staging = parent / f".eve-income-tracker-migrating-{transaction.operation_id}"
+    assert (staging / "attempt-bytes").read_bytes() == b"keep"
+    assert store.read_current() == source
+
+
+@pytest.mark.parametrize("location", ["formal", "diagnostic"])
+def test_reconcile_never_deletes_artifact_without_durable_identity(tmp_path, location):
+    paths, source, store, parent = make_source(tmp_path)
+    transaction, _, diagnostic = record_attempt(
+        source, store, parent, location=location, identity=False, marker=False
+    )
+    artifact = transaction.target.root if location == "formal" else diagnostic
+    restarted_store, service = restarted_service(paths, store)
+    with pytest.raises((DataMigrationError, DataRootValidationError)):
+        service.reconcile_interrupted_migration()
+    assert artifact.is_dir()
+    assert restarted_store.read_migration_transaction() == transaction
+
+
+@pytest.mark.parametrize("boundary", ["rename", "child", "marker", "root"])
+def test_formal_cleanup_restarts_after_each_mutation(tmp_path, monkeypatch, boundary):
+    paths, source, store, parent = make_source(tmp_path)
+    transaction, _, diagnostic = record_attempt(
+        source, store, parent, location="formal"
+    )
+    target = transaction.target.root
+    (target / "attempt-bytes").write_bytes(b"discard")
+    restarted_store, service = restarted_service(paths, store)
+    with monkeypatch.context() as patch:
+        if boundary == "rename":
+            real_rename = data_migration.os.rename
+
+            def rename_then_die(old, new):
+                real_rename(old, new)
+                if old == target and new == diagnostic:
+                    raise SimulatedProcessDeath
+
+            patch.setattr(data_migration.os, "rename", rename_then_die)
+        else:
+            real_delete = windows_owned_delete._delete_opened
+            crash_path = (
+                diagnostic / "attempt-bytes"
+                if boundary == "child"
+                else diagnostic / MARKER_NAME
+                if boundary == "marker"
+                else diagnostic
+            )
+
+            def delete_then_die(kernel, path, handle, *args, **kwargs):
+                result = real_delete(kernel, path, handle, *args, **kwargs)
+                if path == crash_path:
+                    raise SimulatedProcessDeath
+                return result
+
+            patch.setattr(windows_owned_delete, "_delete_opened", delete_then_die)
+        with pytest.raises(SimulatedProcessDeath):
+            service.reconcile_interrupted_migration()
+    assert restarted_store.read_migration_transaction() == transaction
+    assert not target.exists()
+    restarted_store, service = restarted_service(paths, store)
+    assert service.reconcile_interrupted_migration() is True
+    assert restarted_store.read_migration_transaction() is None
+    assert not diagnostic.exists()
+    assert paths.key_path.read_bytes() == b"private protected key"
 
 
 REGISTRY_CRASH_BOUNDARIES = [

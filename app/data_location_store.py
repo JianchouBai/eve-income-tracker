@@ -198,6 +198,10 @@ def _transaction(value: object) -> MigrationTransaction:
         raise DataLocationStoreError("registry_invalid")
     if type(value.version) is not int or value.version != 1:
         raise DataLocationStoreError("registry_invalid")
+    if not isinstance(value.source, DataRootReference) or not isinstance(
+        value.target, DataRootReference
+    ):
+        raise DataLocationStoreError("registry_invalid")
     source = _transaction_reference(
         {
             "root": str(value.source.root),
