@@ -73,11 +73,11 @@ class DataLocationStatus:
 
     @property
     def pending_cleanup_path(self) -> Path | None:
-        return (
-            None
-            if self.pending_cleanup is None
-            else self.pending_cleanup.reference.root
-        )
+        if self.pending_cleanup is None:
+            return None
+        if self.pending_cleanup.removal is not None:
+            return self.pending_cleanup.removal.quarantine
+        return self.pending_cleanup.reference.root
 
 
 class StartupInteraction(Protocol):

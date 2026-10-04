@@ -365,6 +365,7 @@ begin
     RegValueExists(HKCU, DataLocationKey, 'PendingMigrationCreateRecovery') or
     RegValueExists(HKCU, DataLocationKey, 'PendingCleanupRoot') or
     RegValueExists(HKCU, DataLocationKey, 'PendingCleanupRootId') or
+    RegValueExists(HKCU, DataLocationKey, 'PendingCleanupQuarantine') or
     RegValueExists(HKCU, DataLocationKey, 'MigrationTransaction') then
     Exit;
   if not HasRegistryType('DataRoot', RegistryStringType) or
@@ -460,6 +461,7 @@ begin
       RegDeleteValue(HKCU, DataLocationKey, 'DataRootSchema') then
     begin
       RegDeleteValue(HKCU, DataLocationKey, 'MigrationTransaction');
+      RegDeleteValue(HKCU, DataLocationKey, 'PendingCleanupQuarantine');
       RegDeleteKeyIfEmpty(HKCU, DataLocationKey)
     end
     else

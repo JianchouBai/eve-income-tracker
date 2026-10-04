@@ -807,6 +807,12 @@ def test_staging_marker_validation_rename_and_registry_order(tmp_path, monkeypat
         real_write(root, value)
 
     def rename(source, target):
+        if source == reference.root:
+            assert target.parent == reference.root.parent
+            assert target.name.startswith(".eve-income-tracker-removing-")
+            events.append(("source-rename", target))
+            real_rename(source, target)
+            return
         assert source.parent == target.parent == parent
         assert source.name.startswith(".eve-income-tracker-migrating-")
         assert json.loads((source / MARKER_NAME).read_text())["state"] == "ready"
@@ -838,7 +844,7 @@ def test_staging_marker_validation_rename_and_registry_order(tmp_path, monkeypat
     assert events[0][2] == "incomplete"
     stages = [item[0] for item in events]
     assert stages.index("validate") < stages.index("rename") < stages.index("begin")
-    assert stages[-2:] == ["validate", "finalize"]
+    assert stages[-3:] == ["validate", "finalize", "source-rename"]
 
 
 @pytest.mark.parametrize(
@@ -934,15 +940,16 @@ def test_occupied_source_records_pending_cleanup_and_retries_exact_reference(
 ):
     paths, reference, store, parent = make_source(tmp_path)
     service = service_for(paths, store)
-    real_remove = data_migration.remove_owned_data_root
-    monkeypatch.setattr(data_migration, "remove_owned_data_root", fail)
+    real_resume = data_migration.resume_owned_data_root_removal
+    monkeypatch.setattr(data_migration, "resume_owned_data_root_removal", fail)
     result = service.migrate(reference, parent, create_recovery=False)
     assert result.original_removed is False
-    assert result.pending_cleanup == PendingCleanup(reference)
-    assert store.read_pending_cleanup() == PendingCleanup(reference)
+    assert result.pending_cleanup == store.read_pending_cleanup()
+    assert result.pending_cleanup.reference == reference
+    assert result.pending_cleanup.removal is not None
     assert store.read_current() == result.reference
     assert paths.key_path.read_bytes() == b"private protected key"
-    monkeypatch.setattr(data_migration, "remove_owned_data_root", real_remove)
+    monkeypatch.setattr(data_migration, "resume_owned_data_root_removal", real_resume)
     assert service.retry_pending_cleanup() is True
     assert store.read_pending_cleanup() is None
     assert not reference.root.exists()
@@ -1062,7 +1069,7 @@ def test_wal_commits_copied_with_backup_api_without_mutating_critical_source(
         before_db = paths.database_path.read_bytes()
         wal = Path(str(paths.database_path) + "-wal")
         before_wal = wal.read_bytes()
-        monkeypatch.setattr(data_migration, "remove_owned_data_root", fail)
+        monkeypatch.setattr(data_migration, "resume_owned_data_root_removal", fail)
         result = service_for(paths, store).migrate(
             reference, parent, create_recovery=True
         )
@@ -1151,19 +1158,21 @@ def test_partial_delete_failure_is_retryable_through_service(tmp_path, monkeypat
     from app import data_roots
 
     paths, reference, store, parent = make_source(tmp_path)
-    real_delete = data_roots._delete_quarantined_tree
+    real_delete = data_roots.delete_tree_bound
 
-    def partial_delete(root, identity):
-        (root / MARKER_NAME).unlink()
+    def partial_delete(root, identity, *, marker_last=None):
+        assert marker_last == MARKER_NAME
         (root / "logs/app.log").unlink()
         fail()
 
-    monkeypatch.setattr(data_roots, "_delete_quarantined_tree", partial_delete)
+    monkeypatch.setattr(data_roots, "delete_tree_bound", partial_delete)
     service = service_for(paths, store)
     result = service.migrate(reference, parent, create_recovery=False)
-    assert result.pending_cleanup == PendingCleanup(reference)
-    assert read_data_root_marker(reference.root).reference == reference
-    monkeypatch.setattr(data_roots, "_delete_quarantined_tree", real_delete)
+    assert result.pending_cleanup == store.read_pending_cleanup()
+    assert result.pending_cleanup.removal is not None
+    quarantine = result.pending_cleanup.removal.quarantine
+    assert (quarantine / MARKER_NAME).exists()
+    monkeypatch.setattr(data_roots, "delete_tree_bound", real_delete)
     assert service.retry_pending_cleanup()
     assert not reference.root.exists()
     assert read_data_root_marker(result.reference.root).state == "ready"
@@ -1176,17 +1185,17 @@ def test_irrecoverable_cleanup_does_not_record_misleading_old_path(
 
     paths, reference, store, parent = make_source(tmp_path)
 
-    def occupy_original(root, identity):
+    def occupy_original(root, identity, *, marker_last=None):
         reference.root.mkdir()
         (reference.root / "foreign").write_bytes(b"keep")
         fail()
 
-    monkeypatch.setattr(data_roots, "_delete_quarantined_tree", occupy_original)
-    with pytest.raises(DataMigrationError) as caught:
-        service_for(paths, store).migrate(reference, parent, create_recovery=False)
-    assert caught.value.code == "cleanup_restore_failed"
+    monkeypatch.setattr(data_roots, "delete_tree_bound", occupy_original)
+    result = service_for(paths, store).migrate(reference, parent, create_recovery=False)
+    assert not result.original_removed
     assert store.read_current().root == parent / "EVE Income Tracker"
-    assert store.read_pending_cleanup() is None
+    assert store.read_pending_cleanup() == result.pending_cleanup
+    assert result.pending_cleanup.removal.quarantine.exists()
     assert (reference.root / "foreign").read_bytes() == b"keep"
     assert list(reference.root.parent.glob(".eve-income-tracker-removing-*"))
 
@@ -1233,11 +1242,12 @@ def test_pending_migration_consumed_even_if_old_root_is_occupied(tmp_path, monke
 
     paths, reference, store, parent = make_source(tmp_path)
     store.write_pending_migration(PendingMigration(parent, False))
-    monkeypatch.setattr(data_migration, "remove_owned_data_root", fail)
+    monkeypatch.setattr(data_migration, "resume_owned_data_root_removal", fail)
     result = service_for(paths, store).migrate(reference, parent, create_recovery=False)
     assert store.read_current() == result.reference
     assert store.read_pending_migration() is None
-    assert store.read_pending_cleanup() == PendingCleanup(reference)
+    assert store.read_pending_cleanup() == result.pending_cleanup
+    assert result.pending_cleanup.removal is not None
 
 
 def test_failed_registry_rollback_still_quarantines_unselected_formal_target(
@@ -1268,17 +1278,19 @@ def test_failed_cleanup_retry_restore_clears_misleading_original_reference(
     paths, reference, store, parent = make_source(tmp_path)
     service = service_for(paths, store)
     with monkeypatch.context() as patch:
-        patch.setattr(data_migration, "remove_owned_data_root", fail)
+        patch.setattr(data_migration, "resume_owned_data_root_removal", fail)
         service.migrate(reference, parent, create_recovery=False)
 
-    def occupy_original(root, identity):
+    def occupy_original(root, identity, *, marker_last=None):
         reference.root.mkdir()
         (reference.root / "foreign").write_bytes(b"keep")
         fail()
 
-    monkeypatch.setattr(data_roots, "_delete_quarantined_tree", occupy_original)
+    monkeypatch.setattr(data_roots, "delete_tree_bound", occupy_original)
     assert service.retry_pending_cleanup() is False
-    assert store.read_pending_cleanup() is None
+    pending = store.read_pending_cleanup()
+    assert pending is not None and pending.removal is not None
+    assert pending.removal.quarantine.exists()
     assert (reference.root / "foreign").read_bytes() == b"keep"
 
 
@@ -1321,9 +1333,9 @@ def test_missing_cleanup_root_is_not_completed_on_unavailable_or_unsafe_parent(
 
     paths, reference, store, parent = make_source(tmp_path)
     service = service_for(paths, store)
-    real_remove = data_migration.remove_owned_data_root
+    real_remove = data_roots.remove_owned_data_root
     with monkeypatch.context() as patch:
-        patch.setattr(data_migration, "remove_owned_data_root", fail)
+        patch.setattr(data_migration, "resume_owned_data_root_removal", fail)
         service.migrate(reference, parent, create_recovery=False)
     real_remove(reference)
     old_parent = reference.root.parent
@@ -1358,7 +1370,9 @@ def test_missing_cleanup_root_is_not_completed_on_unavailable_or_unsafe_parent(
             link.symlink_to(outside, target_is_directory=True)
     try:
         assert service.retry_pending_cleanup() is False
-        assert store.read_pending_cleanup() == PendingCleanup(reference)
+        pending = store.read_pending_cleanup()
+        assert pending is not None and pending.reference == reference
+        assert pending.removal is not None
         assert store.read_current().root == parent / "EVE Income Tracker"
     finally:
         if link is not None:

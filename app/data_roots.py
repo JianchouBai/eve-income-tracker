@@ -47,6 +47,203 @@ class DataRootMarker:
     state: str
 
 
+@dataclass(frozen=True)
+class DataRootRemovalReceipt:
+    reference: DataRootReference
+    quarantine: Path
+    identity: tuple[int, int]
+    marker: DataRootMarker
+
+
+_REMOVING_PREFIX = ".eve-income-tracker-removing-"
+
+
+def validate_removal_receipt(receipt: DataRootRemovalReceipt) -> None:
+    """Validate durable ownership evidence without requiring an online volume."""
+    if not isinstance(receipt, DataRootRemovalReceipt):
+        raise DataRootValidationError("receipt_invalid")
+    reference = receipt.reference
+    if not isinstance(reference, DataRootReference):
+        raise DataRootValidationError("receipt_invalid")
+    root = reference.root
+    if (
+        not isinstance(root, Path)
+        or not root.is_absolute()
+        or ".." in root.parts
+        or chr(0) in str(root)
+        or root.name != APP_DATA_DIRECTORY
+        or root == Path(root.anchor)
+    ):
+        raise DataRootValidationError("receipt_invalid")
+    if type(reference.schema) is not int or reference.schema != DATA_ROOT_SCHEMA:
+        raise DataRootValidationError("receipt_invalid")
+    try:
+        root_uuid = UUID(reference.root_id)
+    except (ValueError, TypeError, AttributeError):
+        raise DataRootValidationError("receipt_invalid") from None
+    if root_uuid.version != 4 or reference.root_id not in (
+        root_uuid.hex,
+        str(root_uuid),
+    ):
+        raise DataRootValidationError("receipt_invalid")
+    quarantine = receipt.quarantine
+    if not isinstance(quarantine, Path) or not quarantine.is_absolute():
+        raise DataRootValidationError("receipt_invalid")
+    suffix = quarantine.name.removeprefix(_REMOVING_PREFIX)
+    try:
+        quarantine_uuid = UUID(suffix)
+    except (ValueError, AttributeError):
+        raise DataRootValidationError("receipt_invalid") from None
+    if (
+        quarantine.parent != root.parent
+        or quarantine == root
+        or not quarantine.name.startswith(_REMOVING_PREFIX)
+        or quarantine_uuid.version != 4
+        or suffix != quarantine_uuid.hex
+        or ".." in quarantine.parts
+        or chr(0) in str(quarantine)
+    ):
+        raise DataRootValidationError("receipt_invalid")
+    identity = receipt.identity
+    if (
+        not isinstance(identity, tuple)
+        or len(identity) != 2
+        or any(type(part) is not int for part in identity)
+        or identity[0] < 0
+        or identity[1] <= 0
+    ):
+        raise DataRootValidationError("receipt_invalid")
+    marker = receipt.marker
+    if (
+        not isinstance(marker, DataRootMarker)
+        or marker.reference != reference
+        or type(marker.state) is not str
+        or marker.state != "ready"
+        or not isinstance(marker.created_at, str)
+        or not marker.created_at.endswith("Z")
+    ):
+        raise DataRootValidationError("receipt_invalid")
+    try:
+        created = datetime.fromisoformat(marker.created_at)
+    except ValueError:
+        raise DataRootValidationError("receipt_invalid") from None
+    if created.utcoffset() is None or created.utcoffset().total_seconds() != 0:
+        raise DataRootValidationError("receipt_invalid")
+
+
+def prepare_owned_data_root_removal(
+    reference: DataRootReference,
+) -> DataRootRemovalReceipt:
+    root = _validate_reference(reference)
+    if root != reference.root:
+        raise DataRootValidationError("path_invalid")
+    _reject_unsafe_root(root)
+    if root.parent == Path.home().resolve(strict=False):
+        raise DataRootValidationError("path_unsafe")
+    _reject_reparse_components(root)
+    if not root.is_dir():
+        raise DataRootValidationError("path_unavailable")
+    marker = read_data_root_marker(root)
+    if marker.reference != reference:
+        raise DataRootValidationError("marker_mismatch")
+    if marker.state != "ready":
+        raise DataRootValidationError("marker_incomplete")
+    _reject_reparse_tree(root)
+    identity = _directory_identity(root)
+    quarantine = root.with_name(f"{_REMOVING_PREFIX}{uuid4().hex}")
+    if quarantine.exists() or _is_reparse(quarantine):
+        raise DataRootValidationError("remove_failed")
+    receipt = DataRootRemovalReceipt(reference, quarantine, identity, marker)
+    validate_removal_receipt(receipt)
+    return receipt
+
+
+def _removal_location(
+    path: Path, *, allow_non_directory: bool = False
+) -> tuple[int, int] | None:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise DataRootValidationError("path_unavailable") from None
+    if stat.S_ISLNK(details.st_mode) or (
+        getattr(details, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    ):
+        raise DataRootValidationError("path_reparse")
+    if not stat.S_ISDIR(details.st_mode):
+        if allow_non_directory:
+            return -1, -1
+        raise DataRootValidationError("remove_identity_changed")
+    if not details.st_ino:
+        raise DataRootValidationError("remove_identity_changed")
+    return details.st_dev, details.st_ino
+
+
+def resume_owned_data_root_removal(receipt: DataRootRemovalReceipt) -> None:
+    validate_removal_receipt(receipt)
+    root, quarantine = receipt.reference.root, receipt.quarantine
+    _reject_unsafe_root(root)
+    parent = root.parent
+    if parent == Path.home().resolve(strict=False):
+        raise DataRootValidationError("path_unsafe")
+    _reject_reparse_components(parent)
+    if _removal_location(parent) is None:
+        raise DataRootValidationError("path_unavailable")
+    original = _removal_location(root, allow_non_directory=True)
+    moved = _removal_location(quarantine)
+    if moved is None:
+        if original is None:
+            return
+        if original != receipt.identity:
+            raise DataRootValidationError("remove_identity_changed")
+        if _read_data_root_marker_at(root, root) != receipt.marker:
+            raise DataRootValidationError("marker_mismatch")
+        _reject_reparse_tree(root)
+        try:
+            os.rename(root, quarantine)
+        except OSError:
+            raise DataRootValidationError("remove_failed") from None
+        moved = _removal_location(quarantine)
+        original = _removal_location(root, allow_non_directory=True)
+    if moved != receipt.identity:
+        raise DataRootValidationError("remove_identity_changed")
+    if original == receipt.identity:
+        raise DataRootValidationError("remove_ambiguous")
+    if original is not None:
+        try:
+            original_marker = _read_data_root_marker_at(root, root)
+        except DataRootValidationError:
+            original_marker = None
+        if (
+            original_marker is not None
+            and original_marker.reference == receipt.reference
+        ):
+            raise DataRootValidationError("remove_ambiguous")
+    try:
+        moved_marker = _read_data_root_marker_at(quarantine, root)
+    except DataRootValidationError as exc:
+        if exc.code != "marker_invalid":
+            raise
+        try:
+            if any(quarantine.iterdir()):
+                raise DataRootValidationError("marker_invalid")
+            if _removal_location(quarantine) != receipt.identity:
+                raise DataRootValidationError("remove_identity_changed")
+            delete_tree_bound(quarantine, receipt.identity)
+            return
+        except OSError:
+            raise DataRootValidationError("remove_failed") from None
+    if moved_marker != receipt.marker:
+        raise DataRootValidationError("marker_mismatch")
+    _reject_reparse_tree(quarantine)
+    try:
+        delete_tree_bound(quarantine, receipt.identity, marker_last=MARKER_NAME)
+    except OSError:
+        raise DataRootValidationError("remove_failed") from None
+
+
 def _canonical(path: Path, *, reject_traversal: bool = False) -> Path:
     if not isinstance(path, Path) or not path.is_absolute():
         raise DataRootValidationError("path_invalid")

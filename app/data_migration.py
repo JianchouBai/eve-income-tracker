@@ -34,8 +34,9 @@ from app.data_roots import (
     _reject_reparse_tree,
     _reject_unsafe_root,
     _validate_reference,
+    prepare_owned_data_root_removal,
     read_data_root_marker,
-    remove_owned_data_root,
+    resume_owned_data_root_removal,
     validate_existing_data_root,
     validate_new_data_root,
     write_data_root_marker,
@@ -562,18 +563,15 @@ class DataMigrationService:
         except (OSError, ValueError, sqlite3.Error, RuntimeError):
             raise DataMigrationError("cleanup_state_failed") from None
         try:
-            remove_owned_data_root(source)
-        except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
-            if (
-                isinstance(exc, DataRootValidationError)
-                and exc.code == "remove_restore_failed"
-            ):
-                try:
-                    self._store.clear_pending_cleanup()
-                except (OSError, ValueError, sqlite3.Error, RuntimeError):
-                    raise DataMigrationError("cleanup_state_failed") from None
-                raise DataMigrationError("cleanup_restore_failed") from None
-            return MigrationResult(reference, False, PendingCleanup(source))
+            receipt = prepare_owned_data_root_removal(source)
+            self._store.write_pending_cleanup(PendingCleanup(source, receipt))
+            resume_owned_data_root_removal(receipt)
+        except (OSError, ValueError, sqlite3.Error, RuntimeError):
+            try:
+                pending_cleanup = self._store.read_pending_cleanup()
+            except (OSError, ValueError, sqlite3.Error, RuntimeError):
+                raise DataMigrationError("cleanup_state_failed") from None
+            return MigrationResult(reference, False, pending_cleanup)
         try:
             self._store.clear_pending_cleanup()
         except (OSError, ValueError, sqlite3.Error, RuntimeError):
@@ -624,16 +622,19 @@ class DataMigrationService:
             validate_existing_data_root(
                 current, resource_root=self._resource_root, require_writable=False
             )
-            if not self._cleanup_root_is_absent(pending.reference):
-                remove_owned_data_root(pending.reference)
+            receipt = pending.removal
+            if receipt is None:
+                if self._cleanup_root_is_absent(pending.reference):
+                    # Old journals carry no evidence of a completed rename.
+                    return False
+                receipt = prepare_owned_data_root_removal(pending.reference)
+                self._store.write_pending_cleanup(
+                    PendingCleanup(pending.reference, receipt)
+                )
+            resume_owned_data_root_removal(receipt)
             self._store.clear_pending_cleanup()
             return True
-        except DataRootValidationError as exc:
-            if exc.code == "remove_restore_failed":
-                try:
-                    self._store.clear_pending_cleanup()
-                except (OSError, ValueError, sqlite3.Error, RuntimeError):
-                    return False
+        except DataRootValidationError:
             return False
         except (OSError, ValueError, sqlite3.Error, RuntimeError):
             return False

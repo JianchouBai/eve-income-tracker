@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
-from app.data_roots import DataRootReference
+from app.data_roots import (
+    APP_ID,
+    DataRootMarker,
+    DataRootReference,
+    DataRootRemovalReceipt,
+    DataRootValidationError,
+    validate_removal_receipt,
+)
 
 REGISTRY_KEY = r"Software\JianchouBai\EVE Income Tracker"
 REG_SZ = 1
@@ -27,6 +34,13 @@ PENDING_MIGRATION_TARGET = "PendingMigrationTarget"
 PENDING_MIGRATION_CREATE_RECOVERY = "PendingMigrationCreateRecovery"
 PENDING_CLEANUP_ROOT = "PendingCleanupRoot"
 PENDING_CLEANUP_ROOT_ID = "PendingCleanupRootId"
+PENDING_CLEANUP_QUARANTINE = "PendingCleanupQuarantine"
+_CLEANUP_RECEIPT_FIELDS = frozenset(
+    {"version", "reference", "quarantine", "identity", "marker"}
+)
+_CLEANUP_MARKER_FIELDS = frozenset(
+    {"app_id", "root", "root_id", "schema", "created_at", "state"}
+)
 
 
 MIGRATION_TRANSACTION = "MigrationTransaction"
@@ -58,6 +72,7 @@ class PendingMigration:
 @dataclass(frozen=True)
 class PendingCleanup:
     reference: DataRootReference
+    removal: DataRootRemovalReceipt | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +250,94 @@ def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise DataLocationStoreError("registry_invalid")
         value[name] = item
     return value
+
+
+def _cleanup_receipt(value: object) -> DataRootRemovalReceipt:
+    if not isinstance(value, DataRootRemovalReceipt):
+        raise DataLocationStoreError("registry_invalid")
+    try:
+        validate_removal_receipt(value)
+    except (DataRootValidationError, TypeError, ValueError):
+        raise DataLocationStoreError("registry_invalid") from None
+    return value
+
+
+def _receipt_exact_path(value: object) -> Path:
+    path = _path(value, REG_SZ, resolve_links=False)
+    if value != str(path):
+        raise DataLocationStoreError("registry_invalid")
+    return path
+
+
+def _receipt_from_json(encoded: tuple[object, int]) -> DataRootRemovalReceipt:
+    if encoded[1] != REG_SZ or not isinstance(encoded[0], str):
+        raise DataLocationStoreError("registry_invalid")
+    try:
+        payload = json.loads(encoded[0], object_pairs_hook=_strict_json_object)
+    except (json.JSONDecodeError, DataLocationStoreError):
+        raise DataLocationStoreError("registry_invalid") from None
+    if not isinstance(payload, dict) or set(payload) != _CLEANUP_RECEIPT_FIELDS:
+        raise DataLocationStoreError("registry_invalid")
+    if type(payload["version"]) is not int or payload["version"] != 1:
+        raise DataLocationStoreError("registry_invalid")
+    reference = _transaction_reference(payload["reference"])
+    if _receipt_exact_path(payload["reference"]["root"]) != reference.root:
+        raise DataLocationStoreError("registry_invalid")
+    marker_payload = payload["marker"]
+    if (
+        not isinstance(marker_payload, dict)
+        or set(marker_payload) != _CLEANUP_MARKER_FIELDS
+    ):
+        raise DataLocationStoreError("registry_invalid")
+    if marker_payload["app_id"] != APP_ID:
+        raise DataLocationStoreError("registry_invalid")
+    marker_reference = _transaction_reference(
+        {key: marker_payload[key] for key in _MIGRATION_REFERENCE_FIELDS}
+    )
+    if _receipt_exact_path(marker_payload["root"]) != marker_reference.root:
+        raise DataLocationStoreError("registry_invalid")
+    marker = DataRootMarker(
+        marker_reference,
+        marker_payload["created_at"],
+        marker_payload["state"],
+    )
+    identity = _transaction_identity(payload["identity"])
+    if identity is None:
+        raise DataLocationStoreError("registry_invalid")
+    receipt = DataRootRemovalReceipt(
+        reference,
+        _receipt_exact_path(payload["quarantine"]),
+        identity,
+        marker,
+    )
+    return _cleanup_receipt(receipt)
+
+
+def _receipt_json(receipt: DataRootRemovalReceipt) -> str:
+    record = _cleanup_receipt(receipt)
+    reference = record.reference
+    marker = record.marker
+    payload = {
+        "version": 1,
+        "reference": {
+            "root": str(reference.root),
+            "root_id": reference.root_id,
+            "schema": reference.schema,
+        },
+        "quarantine": str(record.quarantine),
+        "identity": list(record.identity),
+        "marker": {
+            "app_id": APP_ID,
+            "root": str(marker.reference.root),
+            "root_id": marker.reference.root_id,
+            "schema": marker.reference.schema,
+            "created_at": marker.created_at,
+            "state": marker.state,
+        },
+    }
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 class _WindowsRegistryBackend:
@@ -448,20 +551,45 @@ class WindowsDataLocationStore:
             raise DataLocationStoreError("registry_invalid")
         # Preserve the registered path so cleanup can reject a parent that
         # became a junction instead of silently resolving to its new target.
-        return PendingCleanup(
-            DataRootReference(_path(*root, resolve_links=False), _id(*root_id), 1)
+        reference = DataRootReference(
+            _path(*root, resolve_links=False), _id(*root_id), 1
         )
+        encoded = self.backend.read(PENDING_CLEANUP_QUARANTINE)
+        removal = _receipt_from_json(encoded) if encoded is not None else None
+        if removal is not None and removal.reference != reference:
+            raise DataLocationStoreError("registry_invalid")
+        return PendingCleanup(reference, removal)
 
     def write_pending_cleanup(self, pending: PendingCleanup) -> None:
         if not isinstance(pending, PendingCleanup):
             raise DataLocationStoreError("registry_invalid")
         reference = _reference(pending.reference)
+        removal = pending.removal
+        if removal is not None and _cleanup_receipt(removal).reference != reference:
+            raise DataLocationStoreError("registry_invalid")
+        existing = self.read_pending_cleanup()
+        if existing is not None and existing.reference != reference:
+            raise DataLocationStoreError("registry_invalid")
+        if existing is not None and existing.removal is not None:
+            if removal is None:
+                removal = existing.removal
+            elif removal != existing.removal:
+                raise DataLocationStoreError("registry_invalid")
+        if existing is None:
+            # Root is the commit field. A receipt-only clear residue must not
+            # become attached to a newly published obligation.
+            self.backend.delete(PENDING_CLEANUP_QUARANTINE)
         self.backend.write(PENDING_CLEANUP_ROOT_ID, reference.root_id, REG_SZ)
         self.backend.write(PENDING_CLEANUP_ROOT, str(reference.root), REG_SZ)
+        if removal is not None:
+            self.backend.write(
+                PENDING_CLEANUP_QUARANTINE, _receipt_json(removal), REG_SZ
+            )
 
     def clear_pending_cleanup(self) -> None:
         self.backend.delete(PENDING_CLEANUP_ROOT)
         self.backend.delete(PENDING_CLEANUP_ROOT_ID)
+        self.backend.delete(PENDING_CLEANUP_QUARANTINE)
 
     def read_migration_transaction(self) -> MigrationTransaction | None:
         encoded = self.backend.read(MIGRATION_TRANSACTION)

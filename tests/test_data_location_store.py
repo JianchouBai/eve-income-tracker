@@ -357,14 +357,15 @@ def test_pending_cleanup_write_uses_root_as_commit_field(tmp_path, stop):
     assert store.read_pending_cleanup() == pending
 
 
-@pytest.mark.parametrize("stop", range(3))
+@pytest.mark.parametrize("stop", range(4))
 def test_pending_cleanup_clear_is_readable_at_every_crash_boundary(tmp_path, stop):
     backend = Backend()
     store = WindowsDataLocationStore(backend)
     pending = PendingCleanup(ref(tmp_path, "old"))
     store.write_pending_cleanup(pending)
+    backend.deletes.clear()
     backend.fail_delete_after = stop
-    if stop < 2:
+    if stop < 3:
         with pytest.raises(OSError):
             store.clear_pending_cleanup()
     else:
@@ -376,6 +377,7 @@ def test_pending_cleanup_clear_is_readable_at_every_crash_boundary(tmp_path, sto
     assert store.read_pending_cleanup() is None
     assert PENDING_CLEANUP_ROOT not in backend.values
     assert PENDING_CLEANUP_ROOT_ID not in backend.values
+    assert "PendingCleanupQuarantine" not in backend.values
 
 
 def test_pending_cleanup_id_residue_is_uncommitted_but_root_requires_id(tmp_path):
