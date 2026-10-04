@@ -39,6 +39,7 @@ from app.data_roots import (
     _reject_unsafe_root,
     _validate_reference,
     data_root_from_parent,
+    inspect_owned_data_root_removal_path,
     read_data_root_marker,
     relocate_existing_data_root,
     validate_existing_data_root,
@@ -76,7 +77,7 @@ class DataLocationStatus:
         if self.pending_cleanup is None:
             return None
         if self.pending_cleanup.removal is not None:
-            return self.pending_cleanup.removal.quarantine
+            return inspect_owned_data_root_removal_path(self.pending_cleanup.removal)
         return self.pending_cleanup.reference.root
 
 

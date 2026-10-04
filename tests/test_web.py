@@ -1800,12 +1800,13 @@ def test_storage_delete_rejects_payload_and_pending_migration(storage_context):
         assert runtime.data_location.recovery is not None
 
 
-def test_storage_status_exposes_only_leftover_cleanup_path(storage_context):
+def test_storage_status_exposes_only_leftover_cleanup_path(storage_context, tmp_path):
     from app.data_location_store import PendingCleanup
     from app.data_roots import (
         DataRootMarker,
         DataRootReference,
-        DataRootRemovalReceipt,
+        prepare_owned_data_root_removal,
+        write_data_root_marker,
     )
 
     settings, services, clock, runtime = storage_context
@@ -1822,25 +1823,19 @@ def test_storage_status_exposes_only_leftover_cleanup_path(storage_context):
         )
         assert "private-" not in response.text
         assert "root_id" not in response.text
-        reference = DataRootReference(
-            Path("F:/Old/EVE Income Tracker"),
-            "7ad53c3e6fa34bd6a37a7b6ec3683f5f",
-            1,
+        source = tmp_path / "old" / "EVE Income Tracker"
+        source.mkdir(parents=True)
+        reference = DataRootReference(source, "7ad53c3e6fa34bd6a37a7b6ec3683f5f", 1)
+        write_data_root_marker(
+            source, DataRootMarker(reference, "2026-10-04T00:00:00Z", "ready")
         )
-        quarantine = Path(
-            "F:/Old/.eve-income-tracker-removing-315aa597f5e14a6f8d2e87f488a53e9f"
-        )
-        runtime.data_location.cleanup = PendingCleanup(
-            reference,
-            DataRootRemovalReceipt(
-                reference,
-                quarantine,
-                (1, 2),
-                DataRootMarker(reference, "2026-10-04T00:00:00Z", "ready"),
-            ),
-        )
+        receipt = prepare_owned_data_root_removal(reference)
+        runtime.data_location.cleanup = PendingCleanup(reference, receipt)
         response = client.get("/api/desktop/data-location")
-        assert response.json()["pending_cleanup_path"] == str(quarantine)
+        assert response.json()["pending_cleanup_path"] == str(source)
+        source.rename(receipt.quarantine)
+        response = client.get("/api/desktop/data-location")
+        assert response.json()["pending_cleanup_path"] == str(receipt.quarantine)
         assert reference.root_id not in response.text
         assert "removal" not in response.json()
         assert "marker" not in response.json()

@@ -14,7 +14,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from app.paths import APP_DATA_DIRECTORY, PROJECT_ROOT, AppPaths, resolve_app_paths
-from app.windows_owned_delete import delete_tree_bound
+from app.windows_owned_delete import delete_tree_bound, remove_empty_directory_bound
 
 MARKER_NAME = ".eve-income-tracker-data.json"
 APP_ID = "59D95F12-7D3B-4C8A-A57D-98F836769441"
@@ -181,6 +181,45 @@ def _removal_location(
     return details.st_dev, details.st_ino
 
 
+def inspect_owned_data_root_removal_path(
+    receipt: DataRootRemovalReceipt,
+) -> Path | None:
+    """Report only an exact, currently identifiable cleanup location."""
+    try:
+        validate_removal_receipt(receipt)
+        root, quarantine = receipt.reference.root, receipt.quarantine
+        _reject_unsafe_root(root)
+        parent = root.parent
+        if parent == Path.home().resolve(strict=False):
+            return None
+        _reject_reparse_components(parent)
+        if _removal_location(parent) is None:
+            return None
+        original = _removal_location(root, allow_non_directory=True)
+        moved = _removal_location(quarantine)
+        if moved == receipt.identity:
+            if original == receipt.identity:
+                return None
+            if original is not None:
+                try:
+                    original_marker = _read_data_root_marker_at(root, root)
+                except DataRootValidationError:
+                    original_marker = None
+                if (
+                    original_marker is not None
+                    and original_marker.reference == receipt.reference
+                ):
+                    return None
+            return quarantine
+        if moved is not None or original != receipt.identity:
+            return None
+        if _read_data_root_marker_at(root, root) == receipt.marker:
+            return root
+    except (DataRootValidationError, OSError, ValueError):
+        return None
+    return None
+
+
 def resume_owned_data_root_removal(receipt: DataRootRemovalReceipt) -> None:
     validate_removal_receipt(receipt)
     root, quarantine = receipt.reference.root, receipt.quarantine
@@ -227,11 +266,9 @@ def resume_owned_data_root_removal(receipt: DataRootRemovalReceipt) -> None:
         if exc.code != "marker_invalid":
             raise
         try:
-            if any(quarantine.iterdir()):
-                raise DataRootValidationError("marker_invalid")
             if _removal_location(quarantine) != receipt.identity:
                 raise DataRootValidationError("remove_identity_changed")
-            delete_tree_bound(quarantine, receipt.identity)
+            remove_empty_directory_bound(quarantine, receipt.identity)
             return
         except OSError:
             raise DataRootValidationError("remove_failed") from None

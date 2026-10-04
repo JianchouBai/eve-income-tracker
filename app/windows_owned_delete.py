@@ -17,6 +17,7 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _FILE_DISPOSITION_INFO_CLASS = 4
+_FILE_ID_INFO_CLASS = 18
 _INVALID_HANDLE = ctypes.c_void_p(-1).value
 
 
@@ -43,6 +44,17 @@ class _Disposition(ctypes.Structure):
     _fields_ = [("delete_file", ctypes.c_ubyte)]
 
 
+class _FileId128(ctypes.Structure):
+    _fields_ = [("identifier", ctypes.c_ubyte * 16)]
+
+
+class _FileIdInfo(ctypes.Structure):
+    _fields_ = [
+        ("volume_serial", ctypes.c_ulonglong),
+        ("file_id", _FileId128),
+    ]
+
+
 def _kernel32():
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateFileW.argtypes = (
@@ -60,6 +72,13 @@ def _kernel32():
         ctypes.POINTER(_ByHandleInformation),
     )
     kernel.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel.GetFileInformationByHandleEx.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
     kernel.SetFileInformationByHandle.argtypes = (
         wintypes.HANDLE,
         ctypes.c_int,
@@ -94,6 +113,15 @@ def _information(kernel, handle) -> _ByHandleInformation:
     if info.attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
         raise OSError("reparse point")
     return info
+
+
+def _volume_serial(kernel, handle) -> int:
+    info = _FileIdInfo()
+    if not kernel.GetFileInformationByHandleEx(
+        handle, _FILE_ID_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        raise OSError(ctypes.get_last_error())
+    return info.volume_serial
 
 
 def _delete_opened(
@@ -148,6 +176,49 @@ def delete_tree_bound(
             kernel.CloseHandle(handle)
             raise
         _delete_opened(kernel, root, handle, marker_last=marker_last)
+    finally:
+        for ancestor_handle in reversed(ancestors):
+            kernel.CloseHandle(ancestor_handle)
+
+
+def remove_empty_directory_bound(
+    root: Path, expected_identity: tuple[int, int]
+) -> None:
+    """Delete only this exact empty directory; never traverse late children."""
+    if os.name != "nt":
+        raise OSError("Windows handle deletion is unavailable")
+    kernel = _kernel32()
+    ancestors = []
+    try:
+        for ancestor in reversed(root.parents):
+            ancestor_handle = _open_bound_handle(kernel, ancestor, delete=False)
+            ancestors.append(ancestor_handle)
+            if (
+                not _information(kernel, ancestor_handle).attributes
+                & _FILE_ATTRIBUTE_DIRECTORY
+            ):
+                raise OSError("non-directory ancestor")
+        handle = _open_bound_handle(kernel, root)
+        try:
+            info = _information(kernel, handle)
+            if not info.attributes & _FILE_ATTRIBUTE_DIRECTORY:
+                raise OSError("non-directory root")
+            opened_identity = (
+                _volume_serial(kernel, handle),
+                (info.index_high << 32) | info.index_low,
+            )
+            if opened_identity != expected_identity:
+                raise OSError("directory identity changed")
+            disposition = _Disposition(1)
+            if not kernel.SetFileInformationByHandle(
+                handle,
+                _FILE_DISPOSITION_INFO_CLASS,
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
+            ):
+                raise OSError(ctypes.get_last_error())
+        finally:
+            kernel.CloseHandle(handle)
     finally:
         for ancestor_handle in reversed(ancestors):
             kernel.CloseHandle(ancestor_handle)

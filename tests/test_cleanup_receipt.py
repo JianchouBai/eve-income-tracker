@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from app import data_roots, windows_owned_delete
-from app.data_location_controller import DataLocationStatus
+from app.data_location_controller import DataLocationController, DataLocationStatus
 from app.data_location_store import (
     PENDING_CLEANUP_QUARANTINE,
     PENDING_CLEANUP_ROOT,
@@ -280,9 +280,76 @@ def test_status_reports_exact_quarantine_without_private_marker_details(tmp_path
     status = DataLocationStatus(
         tmp_path / "selected", "F:", {}, None, PendingCleanup(reference, receipt)
     )
+    assert status.pending_cleanup_path == reference.root
+    assert reference.root_id not in str(status.pending_cleanup_path)
+    os.rename(reference.root, receipt.quarantine)
     assert status.pending_cleanup_path == receipt.quarantine
     assert reference.root_id not in str(status.pending_cleanup_path)
-    assert status.pending_cleanup_path != reference.root
+
+
+def test_status_reports_quarantine_but_not_ambiguous_owned_original(tmp_path):
+    reference, _ = owned(tmp_path)
+    receipt = prepare_owned_data_root_removal(reference)
+    status = DataLocationStatus(
+        tmp_path / "selected", "F:", {}, None, PendingCleanup(reference, receipt)
+    )
+    os.rename(reference.root, receipt.quarantine)
+    reference.root.mkdir()
+    (reference.root / "foreign.txt").write_bytes(b"foreign")
+    assert status.pending_cleanup_path == receipt.quarantine
+    write_data_root_marker(reference.root, receipt.marker)
+    assert status.pending_cleanup_path is None
+
+
+def test_status_omits_absent_and_offline_receipt_locations(tmp_path):
+    reference, _ = owned(tmp_path)
+    receipt = prepare_owned_data_root_removal(reference)
+    status = DataLocationStatus(
+        tmp_path / "selected", "F:", {}, None, PendingCleanup(reference, receipt)
+    )
+    reference.root.rename(reference.root.with_name("unknown-displacement"))
+    assert status.pending_cleanup_path is None
+    reference.root.parent.rename(reference.root.parent.with_name("offline-volume"))
+    assert status.pending_cleanup_path is None
+
+
+def test_controller_status_tracks_receipt_before_and_after_blocked_rename(
+    tmp_path, monkeypatch
+):
+    reference, _ = owned(tmp_path)
+    receipt = prepare_owned_data_root_removal(reference)
+    backend = Backend()
+    store, service = selected_service(tmp_path, backend, reference)
+    store.write_pending_cleanup(PendingCleanup(reference, receipt))
+
+    def fresh_status():
+        controller = DataLocationController(
+            WindowsDataLocationStore(backend),
+            resource_root=tmp_path / "program",
+            default_parent=tmp_path / "default",
+            existing_validator=lambda paths: None,
+        )
+        return controller.status().pending_cleanup_path
+
+    assert fresh_status() == reference.root
+    real_rename = data_roots.os.rename
+
+    def blocked_rename(source, target):
+        raise OSError("locked source")
+
+    monkeypatch.setattr(data_roots.os, "rename", blocked_rename)
+    assert service.retry_pending_cleanup() is False
+    assert fresh_status() == reference.root
+    monkeypatch.setattr(data_roots.os, "rename", real_rename)
+
+    def blocked_delete(root, identity, *, marker_last=None):
+        raise OSError("locked quarantine")
+
+    monkeypatch.setattr(data_roots, "delete_tree_bound", blocked_delete)
+    _, restarted = selected_service(tmp_path, backend, reference)
+    assert restarted.retry_pending_cleanup() is False
+    assert fresh_status() == receipt.quarantine
+    assert store.read_pending_cleanup() == PendingCleanup(reference, receipt)
 
 
 def selected_service(tmp_path, backend, original):
@@ -330,9 +397,12 @@ def deleting_tree(root, identity, *, marker_last=None, crash_after=None):
     remove(root)
 
 
-@pytest.mark.parametrize("crash_after", range(1, 6))
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle deletion only")
+@pytest.mark.parametrize(
+    "crash_target", ["private.txt", "nested/child", "nested", MARKER_NAME, "."]
+)
 def test_fresh_instance_converges_after_each_delete_operation(
-    tmp_path, monkeypatch, crash_after
+    tmp_path, monkeypatch, crash_target
 ):
     reference, _ = owned(tmp_path)
     nested = reference.root / "nested"
@@ -340,18 +410,26 @@ def test_fresh_instance_converges_after_each_delete_operation(
     (nested / "child").write_bytes(b"child")
     backend = Backend()
     store, service = selected_service(tmp_path, backend, reference)
-    store.write_pending_cleanup(PendingCleanup(reference))
+    receipt = prepare_owned_data_root_removal(reference)
+    store.write_pending_cleanup(PendingCleanup(reference, receipt))
+    os.rename(reference.root, receipt.quarantine)
+    target = receipt.quarantine / crash_target
+    real_delete = windows_owned_delete._delete_opened
 
-    def crash_delete(root, identity, *, marker_last=None):
-        deleting_tree(root, identity, marker_last=marker_last, crash_after=crash_after)
+    def crash_after_real_disposition(kernel, path, handle, *, marker_last=None):
+        real_delete(kernel, path, handle, marker_last=marker_last)
+        if path == target:
+            raise SimulatedCrash
 
-    monkeypatch.setattr(data_roots, "delete_tree_bound", crash_delete)
+    monkeypatch.setattr(
+        windows_owned_delete, "_delete_opened", crash_after_real_disposition
+    )
     with pytest.raises(SimulatedCrash):
         service.retry_pending_cleanup()
     pending = WindowsDataLocationStore(backend).read_pending_cleanup()
     assert pending.removal is not None
     assert pending.removal.quarantine.parent == reference.root.parent
-    monkeypatch.setattr(data_roots, "delete_tree_bound", deleting_tree)
+    monkeypatch.setattr(windows_owned_delete, "_delete_opened", real_delete)
     for _ in range(2):
         restarted_store, restarted = selected_service(tmp_path, backend, reference)
         assert restarted.retry_pending_cleanup()
@@ -394,24 +472,70 @@ def test_legacy_missing_root_stays_pending_as_ambiguous(tmp_path):
     assert store.read_pending_cleanup() == PendingCleanup(reference)
 
 
-def test_markerless_empty_quarantine_uses_identity_bound_root_delete(
-    tmp_path, monkeypatch
-):
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle deletion only")
+def test_markerless_empty_quarantine_uses_identity_bound_root_delete(tmp_path):
     reference, _ = owned(tmp_path)
     receipt = prepare_owned_data_root_removal(reference)
     os.rename(reference.root, receipt.quarantine)
     (receipt.quarantine / "private.txt").unlink()
     (receipt.quarantine / MARKER_NAME).unlink()
-    observed = []
-
-    def delete_empty(root, identity, *, marker_last=None):
-        observed.append((root, identity, marker_last))
-        assert list(root.iterdir()) == []
-        root.rmdir()
-
-    monkeypatch.setattr(data_roots, "delete_tree_bound", delete_empty)
     resume_owned_data_root_removal(receipt)
-    assert observed == [(receipt.quarantine, receipt.identity, None)]
+    assert not receipt.quarantine.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle deletion only")
+def test_empty_root_delete_rechecks_identity_on_open_handle(tmp_path, monkeypatch):
+    root = tmp_path / "empty"
+    root.mkdir()
+    details = root.stat()
+    wrong_identity = (details.st_dev, details.st_ino + 1)
+    real_stat = Path.stat
+
+    def spoof_path_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == root:
+
+            class Spoofed:
+                st_dev = wrong_identity[0]
+                st_ino = wrong_identity[1]
+
+            return Spoofed()
+        return result
+
+    monkeypatch.setattr(Path, "stat", spoof_path_stat)
+    with pytest.raises(OSError, match="identity changed"):
+        windows_owned_delete.remove_empty_directory_bound(root, wrong_identity)
+    assert real_stat(root).st_ino == details.st_ino
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle deletion only")
+def test_markerless_late_foreign_child_survives_with_receipt(tmp_path, monkeypatch):
+    reference, _ = owned(tmp_path)
+    receipt = prepare_owned_data_root_removal(reference)
+    os.rename(reference.root, receipt.quarantine)
+    (receipt.quarantine / "private.txt").unlink()
+    (receipt.quarantine / MARKER_NAME).unlink()
+    backend = Backend()
+    store, service = selected_service(tmp_path, backend, reference)
+    store.write_pending_cleanup(PendingCleanup(reference, receipt))
+    real_location = data_roots._removal_location
+    observed = 0
+    foreign = receipt.quarantine / "foreign.txt"
+
+    def add_after_empty_check(path, **kwargs):
+        nonlocal observed
+        result = real_location(path, **kwargs)
+        if path == receipt.quarantine:
+            observed += 1
+            if observed == 2:
+                foreign.write_bytes(b"foreign private bytes")
+        return result
+
+    monkeypatch.setattr(data_roots, "_removal_location", add_after_empty_check)
+    assert service.retry_pending_cleanup() is False
+    assert observed >= 2
+    assert foreign.read_bytes() == b"foreign private bytes"
+    assert store.read_pending_cleanup() == PendingCleanup(reference, receipt)
 
 
 def test_fresh_instance_recovers_after_receipt_persisted_before_rename(
