@@ -227,13 +227,7 @@ class _SmokeInteraction:
         return True
 
 
-def _validate_existing_data(
-    paths: AppPaths,
-    protector_factory,
-    *,
-    allow_key_recovery: bool = False,
-) -> None:
-    """Read-only checks: never construct Database or create/repair a key."""
+def _validate_existing_database(paths: AppPaths) -> None:
     try:
         connection = _read_only_connection(paths.database_path)
         try:
@@ -246,17 +240,39 @@ def _validate_existing_data(
             raise DesktopStartupError("database_future")
         if not _schema_is_supported(paths.database_path, version):
             raise DesktopStartupError("database_corrupt")
-    except (OSError, ValueError, sqlite3.Error, KeyStoreError):
+    except (OSError, ValueError, sqlite3.Error):
         raise DesktopStartupError("existing_data_invalid") from None
+
+
+def _read_existing_key(paths: AppPaths, protector) -> bytes:
     try:
         protected_key = paths.key_path.read_bytes()
     except OSError:
-        raise DesktopStartupError("existing_data_invalid") from None
+        raise KeyStoreError("key_unreadable") from None
     try:
-        plaintext_key = protector_factory().unprotect(protected_key)
-        validate_fernet_key(plaintext_key)
-    except Exception:  # noqa: BLE001 - match FernetKeyStore's corruption boundary.
-        if allow_key_recovery:
+        return validate_fernet_key(protector.unprotect(protected_key))
+    except Exception:  # noqa: BLE001 - match FernetKeyStore._load_existing.
+        raise KeyStoreError("key_corrupt") from None
+
+
+def _validate_existing_data(paths: AppPaths, protector_factory) -> None:
+    """Strict read-only validation for migration, relocation and adoption."""
+    _validate_existing_database(paths)
+    protector = protector_factory()
+    try:
+        _read_existing_key(paths, protector)
+    except KeyStoreError:
+        raise DesktopStartupError("existing_data_invalid") from None
+
+
+def _validate_current_ready_data(paths: AppPaths, protector_factory) -> None:
+    """Defer only corrupt-key recovery for the exact registered ready root."""
+    _validate_existing_database(paths)
+    protector = protector_factory()
+    try:
+        _read_existing_key(paths, protector)
+    except KeyStoreError as error:
+        if error.code == "key_corrupt":
             return
         raise DesktopStartupError("existing_data_invalid") from None
 
@@ -385,10 +401,8 @@ class DesktopApplication:
                 validator = lambda paths: _validate_existing_data(
                     paths, dependencies.protector_factory
                 )
-                current_ready_validator = lambda paths: _validate_existing_data(
-                    paths,
-                    dependencies.protector_factory,
-                    allow_key_recovery=True,
+                current_ready_validator = lambda paths: _validate_current_ready_data(
+                    paths, dependencies.protector_factory
                 )
             else:
                 validator = dependencies.existing_validator

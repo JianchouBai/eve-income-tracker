@@ -383,6 +383,99 @@ def test_current_ready_validator_does_not_weaken_pending_migration_validation(
     assert not (target_parent / "EVE Income Tracker").exists()
 
 
+def test_current_ready_validator_does_not_weaken_legacy_adoption(tmp_path):
+    paths, _ = existing(tmp_path, marked=False)
+    paths.key_path.write_bytes(b"corrupt-key")
+    store = MemoryDataLocationStore()
+    strict_calls = []
+
+    def strict_validator(candidate):
+        strict_calls.append(candidate.data_root)
+        raise ValueError("bad key")
+
+    controller = DataLocationController(
+        store,
+        resource_root=tmp_path / "program",
+        default_parent=tmp_path / "local",
+        existing_validator=strict_validator,
+        current_ready_validator=lambda candidate: None,
+    )
+
+    with pytest.raises(DataLocationError, match="existing_data_invalid"):
+        controller.resolve_startup(paths.data_root, Interaction(legacy="keep"))
+    assert strict_calls == [paths.data_root]
+    assert store.read_current() is None
+    assert not (paths.data_root / MARKER_NAME).exists()
+
+
+def test_current_ready_validator_does_not_weaken_locate_missing_relocation(tmp_path):
+    paths, current = existing(tmp_path, "old")
+    store = MemoryDataLocationStore()
+    select(store, current)
+    relocated_parent = tmp_path / "relocated"
+    relocated_parent.mkdir()
+    relocated_root = relocated_parent / "EVE Income Tracker"
+    marker_before = (paths.data_root / MARKER_NAME).read_bytes()
+    paths.data_root.rename(relocated_root)
+    relocated_key = relocated_root / "config/local.key"
+    relocated_key.write_bytes(b"corrupt-key")
+    strict_calls = []
+
+    def strict_validator(candidate):
+        strict_calls.append(candidate.data_root)
+        if candidate.key_path.read_bytes() != b"protected-key":
+            raise ValueError("bad key")
+
+    controller = DataLocationController(
+        store,
+        resource_root=tmp_path / "program",
+        default_parent=tmp_path / "local",
+        existing_validator=strict_validator,
+        current_ready_validator=lambda candidate: None,
+    )
+    interaction = Interaction(actions=["locate"], roots=[relocated_root])
+
+    with pytest.raises(DataLocationError, match="startup_cancelled"):
+        controller.resolve_startup(tmp_path / "local/EVE Income Tracker", interaction)
+    assert strict_calls == [relocated_root]
+    assert store.read_current() == current
+    assert (relocated_root / MARKER_NAME).read_bytes() == marker_before
+
+
+@pytest.mark.parametrize("marker_state", ["ready", "incomplete"])
+def test_current_ready_validator_does_not_weaken_complete_initialization(
+    tmp_path, marker_state
+):
+    paths, reference = existing(tmp_path)
+    paths.key_path.write_bytes(b"corrupt-key")
+    original_marker = read_data_root_marker(reference.root)
+    if marker_state == "incomplete":
+        original_marker = DataRootMarker(
+            reference, original_marker.created_at, "incomplete"
+        )
+        write_data_root_marker(reference.root, original_marker)
+    store = MemoryDataLocationStore()
+    select(store, reference)
+    strict_calls = []
+
+    def strict_validator(candidate):
+        strict_calls.append(candidate.data_root)
+        raise ValueError("bad key")
+
+    controller = DataLocationController(
+        store,
+        resource_root=tmp_path / "program",
+        default_parent=tmp_path / "local",
+        existing_validator=strict_validator,
+        current_ready_validator=lambda candidate: None,
+    )
+
+    with pytest.raises(DataLocationError, match="existing_data_invalid"):
+        controller.complete_initialization(reference)
+    assert strict_calls == [paths.data_root]
+    assert read_data_root_marker(reference.root) == original_marker
+
+
 def test_status_categories_recovery_delete_and_success(tmp_path):
     paths, ref = existing(tmp_path)
     paths.logs_dir.mkdir()

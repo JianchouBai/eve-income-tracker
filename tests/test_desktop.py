@@ -718,6 +718,62 @@ def test_real_controller_corrupt_ready_root_database_stays_in_location_recovery(
     )
 
 
+def test_real_controller_protector_construction_failure_stops_location_validation(
+    tmp_path,
+):
+    from dataclasses import replace
+
+    from app.data_location_controller import DataLocationController
+
+    events = []
+    dependencies, paths, _, _ = recording_dependencies(
+        tmp_path, events, real_database=True
+    )
+    store = MemoryDataLocationStore()
+    _registered_ready_root(paths, store, b"existing-protected-key")
+    location_errors = []
+
+    def fail_protector_construction():
+        raise OSError("protector unavailable")
+
+    dependencies = replace(
+        dependencies,
+        data_location_factory=DataLocationController,
+        data_location_store_factory=lambda: store,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_retry_locate_exit=lambda code: location_errors.append(code) or "exit"
+        ),
+        protector_factory=fail_protector_construction,
+    )
+
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 1
+    )
+    assert location_errors == ["existing_data_invalid"]
+    assert "log" not in event_names(events)
+    assert "database" not in event_names(events)
+
+
+def test_current_ready_data_does_not_defer_unreadable_key(tmp_path, monkeypatch):
+    from app.desktop import DesktopStartupError, _validate_current_ready_data
+
+    paths = fake_paths(tmp_path)
+    Database(paths.database_path).initialize()
+    paths.key_path.parent.mkdir(parents=True)
+    paths.key_path.write_bytes(b"protected-key")
+    original_read_bytes = Path.read_bytes
+
+    def denied(candidate):
+        if candidate == paths.key_path:
+            raise PermissionError("key unreadable")
+        return original_read_bytes(candidate)
+
+    monkeypatch.setattr(Path, "read_bytes", denied)
+    with pytest.raises(DesktopStartupError, match="existing_data_invalid"):
+        _validate_current_ready_data(paths, lambda: _ProductionLikeProtector())
+
+
 def test_failed_corrupt_key_replacement_rolls_back_authorization_reset(tmp_path):
     events = []
     dependencies, paths, _, _ = recording_dependencies(
