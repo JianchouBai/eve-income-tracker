@@ -227,7 +227,12 @@ class _SmokeInteraction:
         return True
 
 
-def _validate_existing_data(paths: AppPaths, protector_factory) -> None:
+def _validate_existing_data(
+    paths: AppPaths,
+    protector_factory,
+    *,
+    allow_key_recovery: bool = False,
+) -> None:
     """Read-only checks: never construct Database or create/repair a key."""
     try:
         connection = _read_only_connection(paths.database_path)
@@ -241,8 +246,18 @@ def _validate_existing_data(paths: AppPaths, protector_factory) -> None:
             raise DesktopStartupError("database_future")
         if not _schema_is_supported(paths.database_path, version):
             raise DesktopStartupError("database_corrupt")
-        validate_fernet_key(protector_factory().unprotect(paths.key_path.read_bytes()))
     except (OSError, ValueError, sqlite3.Error, KeyStoreError):
+        raise DesktopStartupError("existing_data_invalid") from None
+    try:
+        protected_key = paths.key_path.read_bytes()
+    except OSError:
+        raise DesktopStartupError("existing_data_invalid") from None
+    try:
+        plaintext_key = protector_factory().unprotect(protected_key)
+        validate_fernet_key(plaintext_key)
+    except Exception:  # noqa: BLE001 - match FernetKeyStore's corruption boundary.
+        if allow_key_recovery:
+            return
         raise DesktopStartupError("existing_data_invalid") from None
 
 
@@ -366,16 +381,24 @@ class DesktopApplication:
                 else dependencies.data_location_store_factory()
             )
             recovery = dependencies.recovery_factory()
-            validator = dependencies.existing_validator or (
-                lambda paths: _validate_existing_data(
+            if dependencies.existing_validator is None:
+                validator = lambda paths: _validate_existing_data(
                     paths, dependencies.protector_factory
                 )
-            )
+                current_ready_validator = lambda paths: _validate_existing_data(
+                    paths,
+                    dependencies.protector_factory,
+                    allow_key_recovery=True,
+                )
+            else:
+                validator = dependencies.existing_validator
+                current_ready_validator = validator
             controller = dependencies.data_location_factory(
                 store,
                 resource_root=defaults.resource_root,
                 default_parent=defaults.data_root.parent,
                 existing_validator=validator,
+                current_ready_validator=current_ready_validator,
                 recovery_service=recovery,
             )
             interaction = (

@@ -7,7 +7,11 @@ from uuid import uuid4
 import pytest
 
 from app.data_location_controller import DataLocationController, DataLocationError
-from app.data_location_store import MemoryDataLocationStore, PendingCleanup
+from app.data_location_store import (
+    MemoryDataLocationStore,
+    PendingCleanup,
+    PendingMigration,
+)
 from app.data_roots import (
     MARKER_NAME,
     DataRootMarker,
@@ -320,6 +324,63 @@ def test_reconnect_failed_switch_rolls_back_and_sanitizes(tmp_path, monkeypatch)
         make_controller(tmp_path, store).reconnect_existing(paths.data_root)
     assert "private" not in repr(caught.value)
     assert store.read_current() == ref
+
+
+def test_current_ready_validator_does_not_weaken_reconnect_validation(tmp_path):
+    _, current = existing(tmp_path, "current")
+    candidate_paths, candidate = existing(
+        tmp_path, "candidate", root_id=current.root_id
+    )
+    candidate_paths.key_path.write_bytes(b"corrupt-key")
+    store = MemoryDataLocationStore()
+    select(store, current)
+
+    def strict_validator(paths):
+        if paths.key_path.read_bytes() != b"protected-key":
+            raise ValueError("bad key")
+
+    controller = DataLocationController(
+        store,
+        resource_root=tmp_path / "program",
+        default_parent=tmp_path / "local",
+        existing_validator=strict_validator,
+        current_ready_validator=lambda paths: None,
+    )
+
+    with pytest.raises(DataLocationError, match="existing_data_invalid"):
+        controller.reconnect_existing(candidate.root)
+    assert store.read_current() == current
+
+
+def test_current_ready_validator_does_not_weaken_pending_migration_validation(
+    tmp_path,
+):
+    paths, current = existing(tmp_path, "current")
+    paths.key_path.write_bytes(b"corrupt-key")
+    target_parent = tmp_path / "target"
+    target_parent.mkdir()
+    store = MemoryDataLocationStore()
+    select(store, current)
+    store.write_pending_migration(PendingMigration(target_parent, False))
+
+    def strict_validator(candidate):
+        if candidate.key_path.read_bytes() != b"protected-key":
+            raise ValueError("bad key")
+
+    controller = DataLocationController(
+        store,
+        resource_root=tmp_path / "program",
+        default_parent=tmp_path / "local",
+        existing_validator=strict_validator,
+        current_ready_validator=lambda candidate: None,
+    )
+
+    assert controller.resolve_startup(paths.data_root, Interaction()) == current
+    with pytest.raises(DataLocationError, match="existing_data_invalid"):
+        controller.execute_pending_migration()
+    assert store.read_current() == current
+    assert store.read_pending_migration() == PendingMigration(target_parent, False)
+    assert not (target_parent / "EVE Income Tracker").exists()
 
 
 def test_status_categories_recovery_delete_and_success(tmp_path):

@@ -314,12 +314,14 @@ def test_storage_dialog_is_desktop_only_and_versions_are_dynamic(tmp_path, monke
     )
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
         release_page = browser.get("/").text
-    assert "V1.0" in release_page and "V1.0.0" in release_page
+    assert "<span class='system-state'>V1.0</span>" in release_page
+    assert "<p class='storage-version'>关于 EVE 每日收益 · V1.0.0</p>" in release_page
 
     monkeypatch.setattr(web, "APP_VERSION", "8.7.6", raising=False)
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
         page = browser.get("/").text
-    assert "V8.7" in page and "V8.7.6" in page
+    assert "<span class='system-state'>V8.7</span>" in page
+    assert "<p class='storage-version'>关于 EVE 每日收益 · V8.7.6</p>" in page
     assert "<dialog id='data-settings-dialog'" in page
     assert "aria-labelledby='data-settings-title'" in page
     for label in (

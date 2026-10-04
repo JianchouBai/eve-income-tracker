@@ -585,6 +585,139 @@ def test_declining_corrupt_key_recovery_exits_without_resetting_data(tmp_path):
     assert "重置本机授权" in questions[0]
 
 
+class _ProductionLikeProtector:
+    _PREFIX = b"dpapi-test:"
+
+    def protect(self, plaintext):
+        return self._PREFIX + plaintext[::-1]
+
+    def unprotect(self, protected):
+        if not protected.startswith(self._PREFIX):
+            raise OSError("invalid protected payload")
+        return protected.removeprefix(self._PREFIX)[::-1]
+
+
+def _registered_ready_root(paths, store, protected_key):
+    from app.data_roots import DataRootMarker, DataRootReference, write_data_root_marker
+
+    Database(paths.database_path).initialize()
+    paths.key_path.parent.mkdir(parents=True)
+    paths.key_path.write_bytes(protected_key)
+    reference = DataRootReference(
+        paths.data_root, "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa", 1
+    )
+    write_data_root_marker(
+        paths.data_root,
+        DataRootMarker(reference, "2026-10-01T00:00:00Z", "ready"),
+    )
+    store.begin_current_switch(reference)
+    store.finalize_current_switch()
+    return reference
+
+
+@pytest.mark.parametrize("accept_recovery", [False, True])
+def test_real_controller_corrupt_ready_root_key_reaches_consent_flow(
+    tmp_path, accept_recovery
+):
+    from dataclasses import replace
+
+    from app.data_location_controller import DataLocationController
+    from app.key_store import FernetKeyStore
+
+    events = []
+    dependencies, paths, _, _ = recording_dependencies(
+        tmp_path, events, ask=accept_recovery, real_database=True
+    )
+    store = MemoryDataLocationStore()
+    corrupt = b"not-a-valid-dpapi-payload"
+    _registered_ready_root(paths, store, corrupt)
+    protector = _ProductionLikeProtector()
+
+    def no_location_recovery(code):
+        raise AssertionError(f"corrupt key was treated as a location failure: {code}")
+
+    dependencies = replace(
+        dependencies,
+        data_location_factory=DataLocationController,
+        data_location_store_factory=lambda: store,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_retry_locate_exit=no_location_recovery
+        ),
+        protector_factory=lambda: protector,
+        key_store_factory=FernetKeyStore,
+    )
+
+    result = DesktopApplication(
+        local_app_data=tmp_path, dependencies=dependencies
+    ).run()
+
+    recovery_questions = [
+        event[1]
+        for event in events
+        if isinstance(event, tuple) and event[0] == "ask" and "重置本机授权" in event[1]
+    ]
+    assert len(recovery_questions) == 1
+    if not accept_recovery:
+        assert result == 1
+        assert paths.key_path.read_bytes() == corrupt
+        assert list(paths.backups_dir.glob("local-key-corrupt-*.bin")) == []
+        return
+
+    assert result == 0
+    replacement = protector.unprotect(paths.key_path.read_bytes())
+    Fernet(replacement)
+    key_backups = list(paths.backups_dir.glob("local-key-corrupt-*.bin"))
+    assert len(key_backups) == 1
+    assert key_backups[0].read_bytes() == corrupt
+    assert Database(paths.database_path).inspect_version() == LATEST_SCHEMA_VERSION
+
+
+def test_real_controller_corrupt_ready_root_database_stays_in_location_recovery(
+    tmp_path,
+):
+    from dataclasses import replace
+
+    from app.data_location_controller import DataLocationController
+    from app.key_store import FernetKeyStore
+
+    events = []
+    dependencies, paths, _, _ = recording_dependencies(
+        tmp_path, events, real_database=True
+    )
+    store = MemoryDataLocationStore()
+    protector = _ProductionLikeProtector()
+    original_key = protector.protect(Fernet.generate_key())
+    _registered_ready_root(paths, store, original_key)
+    paths.database_path.write_bytes(b"not-a-sqlite-database")
+    location_errors = []
+
+    def exit_location_recovery(code):
+        location_errors.append(code)
+        return "exit"
+
+    dependencies = replace(
+        dependencies,
+        data_location_factory=DataLocationController,
+        data_location_store_factory=lambda: store,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_retry_locate_exit=exit_location_recovery
+        ),
+        protector_factory=lambda: protector,
+        key_store_factory=FernetKeyStore,
+    )
+
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 1
+    )
+    assert location_errors == ["existing_data_invalid"]
+    assert paths.key_path.read_bytes() == original_key
+    assert not any(
+        isinstance(event, tuple) and event[0] == "ask" and "重置本机授权" in event[1]
+        for event in events
+    )
+
+
 def test_failed_corrupt_key_replacement_rolls_back_authorization_reset(tmp_path):
     events = []
     dependencies, paths, _, _ = recording_dependencies(
@@ -729,6 +862,7 @@ def test_uninstall_cli_dispatches_cleanup_without_desktop_start(tmp_path, monkey
     assert result == 0
     assert calls == [(root, root_id)]
 
+
 @pytest.mark.skipif(
     __import__("os").name != "nt", reason="desktop entry targets Windows"
 )
@@ -780,6 +914,7 @@ class RecordingLocation:
         default_parent,
         existing_validator,
         recovery_service,
+        current_ready_validator=None,
     ):
         self.store = store
         self.resource_root = resource_root

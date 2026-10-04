@@ -120,12 +120,14 @@ class DataLocationController:
         resource_root: Path,
         default_parent: Path,
         existing_validator: Callable[[AppPaths], None],
+        current_ready_validator: Callable[[AppPaths], None] | None = None,
         recovery_service: RecoverySnapshotService | None = None,
     ) -> None:
         self._store = store
         self._resource_root = resource_root
         self._default_parent = default_parent
         self._existing_validator = existing_validator
+        self._current_ready_validator = current_ready_validator or existing_validator
         self._recovery = recovery_service or RecoverySnapshotService()
         self._migration = DataMigrationService(
             store,
@@ -139,7 +141,12 @@ class DataLocationController:
             frozen=True, bundle_root=self._resource_root, data_root=root
         )
 
-    def _validate_contents(self, paths: AppPaths) -> None:
+    def _validate_contents(
+        self,
+        paths: AppPaths,
+        *,
+        validator: Callable[[AppPaths], None] | None = None,
+    ) -> None:
         _reject_reparse_components(paths.data_root)
         _reject_reparse_tree(paths.data_root)
         if (
@@ -150,15 +157,20 @@ class DataLocationController:
         ):
             raise DataLocationError("existing_data_invalid")
         try:
-            self._existing_validator(paths)
+            (validator or self._existing_validator)(paths)
         except (OSError, ValueError, RuntimeError, sqlite3.Error):
             raise DataLocationError("existing_data_invalid") from None
 
-    def _validate(self, reference: DataRootReference) -> AppPaths:
+    def _validate(
+        self,
+        reference: DataRootReference,
+        *,
+        validator: Callable[[AppPaths], None] | None = None,
+    ) -> AppPaths:
         paths = validate_existing_data_root(
             reference, resource_root=self._resource_root
         )
-        self._validate_contents(paths)
+        self._validate_contents(paths, validator=validator)
         return paths
 
     def _current(self) -> DataRootReference:
@@ -327,7 +339,7 @@ class DataLocationController:
                 if marker.state == "incomplete":
                     self._initializing(current)
                 else:
-                    self._validate(current)
+                    self._validate(current, validator=self._current_ready_validator)
                 return current
             except (DataLocationError, DataRootValidationError) as exc:
                 code = exc.code
