@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
@@ -27,6 +29,20 @@ PENDING_CLEANUP_ROOT = "PendingCleanupRoot"
 PENDING_CLEANUP_ROOT_ID = "PendingCleanupRootId"
 
 
+MIGRATION_TRANSACTION = "MigrationTransaction"
+_MIGRATION_TRANSACTION_FIELDS = frozenset(
+    {
+        "version",
+        "operation_id",
+        "source",
+        "target",
+        "created_at",
+        "staging_identity",
+    }
+)
+_MIGRATION_REFERENCE_FIELDS = frozenset({"root", "root_id", "schema"})
+
+
 class DataLocationStoreError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
@@ -42,6 +58,16 @@ class PendingMigration:
 @dataclass(frozen=True)
 class PendingCleanup:
     reference: DataRootReference
+
+
+@dataclass(frozen=True)
+class MigrationTransaction:
+    version: int
+    operation_id: str
+    source: DataRootReference
+    target: DataRootReference
+    created_at: str
+    staging_identity: tuple[int, int] | None
 
 
 class RegistryBackend(Protocol):
@@ -61,6 +87,9 @@ class DataLocationStore(Protocol):
     def read_pending_cleanup(self) -> PendingCleanup | None: ...
     def write_pending_cleanup(self, pending: PendingCleanup) -> None: ...
     def clear_pending_cleanup(self) -> None: ...
+    def read_migration_transaction(self) -> MigrationTransaction | None: ...
+    def write_migration_transaction(self, value: MigrationTransaction) -> None: ...
+    def clear_migration_transaction(self) -> None: ...
 
 
 def _path(value: object, kind: int, *, resolve_links: bool = True) -> Path:
@@ -114,6 +143,94 @@ def _reference(reference: DataRootReference) -> DataRootReference:
         _id(reference.root_id, REG_SZ),
         _schema(reference.schema, REG_DWORD),
     )
+
+
+def _transaction_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise DataLocationStoreError("registry_invalid")
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError):
+        raise DataLocationStoreError("registry_invalid") from None
+    if parsed.version != 4 or value != parsed.hex:
+        raise DataLocationStoreError("registry_invalid")
+    return value
+
+
+def _transaction_timestamp(value: object) -> str:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise DataLocationStoreError("registry_invalid")
+    try:
+        created = datetime.fromisoformat(value)
+    except ValueError:
+        raise DataLocationStoreError("registry_invalid") from None
+    if created.utcoffset() is None or created.utcoffset().total_seconds() != 0:
+        raise DataLocationStoreError("registry_invalid")
+    return value
+
+
+def _transaction_identity(value: object) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 2
+        or any(type(part) is not int for part in value)
+        or value[0] < 0
+        or value[1] <= 0
+    ):
+        raise DataLocationStoreError("registry_invalid")
+    return value[0], value[1]
+
+
+def _transaction_reference(value: object) -> DataRootReference:
+    if not isinstance(value, dict) or set(value) != _MIGRATION_REFERENCE_FIELDS:
+        raise DataLocationStoreError("registry_invalid")
+    return DataRootReference(
+        _path(value["root"], REG_SZ, resolve_links=False),
+        _id(value["root_id"], REG_SZ),
+        _schema(value["schema"], REG_DWORD),
+    )
+
+
+def _transaction(value: object) -> MigrationTransaction:
+    if not isinstance(value, MigrationTransaction):
+        raise DataLocationStoreError("registry_invalid")
+    if type(value.version) is not int or value.version != 1:
+        raise DataLocationStoreError("registry_invalid")
+    source = _transaction_reference(
+        {
+            "root": str(value.source.root),
+            "root_id": value.source.root_id,
+            "schema": value.source.schema,
+        }
+    )
+    target = _transaction_reference(
+        {
+            "root": str(value.target.root),
+            "root_id": value.target.root_id,
+            "schema": value.target.schema,
+        }
+    )
+    if source.root == target.root:
+        raise DataLocationStoreError("registry_invalid")
+    return MigrationTransaction(
+        value.version,
+        _transaction_id(value.operation_id),
+        source,
+        target,
+        _transaction_timestamp(value.created_at),
+        _transaction_identity(value.staging_identity),
+    )
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for name, item in pairs:
+        if name in value:
+            raise DataLocationStoreError("registry_invalid")
+        value[name] = item
+    return value
 
 
 class _WindowsRegistryBackend:
@@ -341,6 +458,59 @@ class WindowsDataLocationStore:
     def clear_pending_cleanup(self) -> None:
         self.backend.delete(PENDING_CLEANUP_ROOT)
         self.backend.delete(PENDING_CLEANUP_ROOT_ID)
+
+    def read_migration_transaction(self) -> MigrationTransaction | None:
+        encoded = self.backend.read(MIGRATION_TRANSACTION)
+        if encoded is None:
+            return None
+        if encoded[1] != REG_SZ or not isinstance(encoded[0], str):
+            raise DataLocationStoreError("registry_invalid")
+        try:
+            payload = json.loads(encoded[0], object_pairs_hook=_strict_json_object)
+        except (json.JSONDecodeError, DataLocationStoreError):
+            raise DataLocationStoreError("registry_invalid") from None
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != _MIGRATION_TRANSACTION_FIELDS
+        ):
+            raise DataLocationStoreError("registry_invalid")
+        if type(payload["version"]) is not int or payload["version"] != 1:
+            raise DataLocationStoreError("registry_invalid")
+        value = MigrationTransaction(
+            payload["version"],
+            _transaction_id(payload["operation_id"]),
+            _transaction_reference(payload["source"]),
+            _transaction_reference(payload["target"]),
+            _transaction_timestamp(payload["created_at"]),
+            _transaction_identity(payload["staging_identity"]),
+        )
+        return _transaction(value)
+
+    def write_migration_transaction(self, value: MigrationTransaction) -> None:
+        record = _transaction(value)
+        payload = {
+            "version": record.version,
+            "operation_id": record.operation_id,
+            "source": {
+                "root": str(record.source.root),
+                "root_id": record.source.root_id,
+                "schema": record.source.schema,
+            },
+            "target": {
+                "root": str(record.target.root),
+                "root_id": record.target.root_id,
+                "schema": record.target.schema,
+            },
+            "created_at": record.created_at,
+            "staging_identity": record.staging_identity,
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        self.backend.write(MIGRATION_TRANSACTION, encoded, REG_SZ)
+
+    def clear_migration_transaction(self) -> None:
+        self.backend.delete(MIGRATION_TRANSACTION)
 
 
 class MemoryDataLocationStore(WindowsDataLocationStore):

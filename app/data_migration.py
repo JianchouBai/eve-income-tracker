@@ -18,7 +18,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from app.data_location_store import DataLocationStore, PendingCleanup
+from app.data_location_store import (
+    DataLocationStore,
+    MigrationTransaction,
+    PendingCleanup,
+)
 from app.data_roots import (
     MARKER_NAME,
     DataRootMarker,
@@ -221,11 +225,13 @@ class DataMigrationService:
         _reject_reparse_tree(staging)
         delete_tree_bound(staging, identity)
 
-    def _quarantine(self, root: Path, identity: tuple[int, int]) -> None:
+    def _quarantine(
+        self, root: Path, identity: tuple[int, int], operation_id: str
+    ) -> None:
         _reject_reparse_components(root)
         if _directory_identity(root) != identity:
             raise DataMigrationError("cleanup_failed")
-        quarantine = root.with_name(f".eve-income-tracker-failed-{uuid4().hex}")
+        quarantine = root.with_name(f".eve-income-tracker-failed-{operation_id}")
         try:
             os.replace(root, quarantine)
         except OSError:
@@ -234,6 +240,122 @@ class DataMigrationService:
             write_data_root_marker(
                 root, DataRootMarker(marker.reference, marker.created_at, "incomplete")
             )
+
+    def _transaction_paths(
+        self, transaction: MigrationTransaction
+    ) -> tuple[Path, Path, Path]:
+        source = _validate_reference(transaction.source)
+        target = _validate_reference(transaction.target)
+        _reject_unsafe_root(source, self._resource_root.resolve(strict=False))
+        _reject_unsafe_root(target, self._resource_root.resolve(strict=False))
+        if source.parent == Path.home().resolve(
+            strict=False
+        ) or target.parent == Path.home().resolve(strict=False):
+            raise DataMigrationError("registry_state_unknown")
+        staging = target.with_name(
+            f".eve-income-tracker-migrating-{transaction.operation_id}"
+        )
+        failed = target.with_name(
+            f".eve-income-tracker-failed-{transaction.operation_id}"
+        )
+        return staging, target, failed
+
+    def _discard_transaction_path(
+        self,
+        path: Path,
+        identity: tuple[int, int] | None,
+        *,
+        reference: DataRootReference | None = None,
+    ) -> None:
+        _reject_reparse_components(path)
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            return
+        if not stat.S_ISDIR(details.st_mode):
+            raise DataMigrationError("cleanup_failed")
+        if identity is None:
+            try:
+                path.rmdir()
+            except OSError:
+                raise DataMigrationError("cleanup_failed") from None
+            return
+        if _directory_identity(path) != identity:
+            raise DataMigrationError("cleanup_failed")
+        if reference is not None:
+            marker = read_data_root_marker(path)
+            if marker.reference != reference:
+                raise DataMigrationError("cleanup_failed")
+        _reject_reparse_tree(path)
+        delete_tree_bound(path, identity)
+
+    def reconcile_interrupted_migration(self) -> bool:
+        transaction = self._store.read_migration_transaction()
+        if transaction is None:
+            return False
+        staging, target, failed = self._transaction_paths(transaction)
+        current = self._store.read_current()
+        if current == transaction.source:
+            self._store.rollback_current_switch()
+            if self._store.read_current() != transaction.source:
+                raise DataMigrationError("registry_state_unknown")
+            pending_cleanup = self._store.read_pending_cleanup()
+            if (
+                pending_cleanup is not None
+                and pending_cleanup.reference != transaction.source
+            ):
+                raise DataMigrationError("registry_state_unknown")
+            self._store.clear_pending_cleanup()
+            present = []
+            for path in (staging, target, failed):
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    continue
+                present.append(path)
+            if len(present) > 1:
+                raise DataMigrationError("cleanup_failed")
+            if present:
+                path = present[0]
+                self._discard_transaction_path(
+                    path,
+                    transaction.staging_identity,
+                    reference=transaction.target if path == target else None,
+                )
+            self._store.clear_migration_transaction()
+            return True
+        if current == transaction.target:
+            validate_existing_data_root(
+                transaction.target,
+                resource_root=self._resource_root,
+                require_writable=False,
+            )
+            if (
+                transaction.staging_identity is None
+                or _directory_identity(target) != transaction.staging_identity
+            ):
+                raise DataMigrationError("registry_state_unknown")
+            for sibling in (staging, failed):
+                try:
+                    sibling.lstat()
+                except FileNotFoundError:
+                    continue
+                raise DataMigrationError("registry_state_unknown")
+            self._store.finalize_current_switch()
+            if self._store.read_current() != transaction.target:
+                raise DataMigrationError("registry_state_unknown")
+            pending_cleanup = self._store.read_pending_cleanup()
+            if pending_cleanup is None:
+                self._store.write_pending_cleanup(PendingCleanup(transaction.source))
+            elif pending_cleanup.reference != transaction.source:
+                raise DataMigrationError("registry_state_unknown")
+            pending = self._store.read_pending_migration()
+            if pending is not None and pending.target_parent != target.parent:
+                raise DataMigrationError("registry_state_unknown")
+            self._store.clear_pending_migration()
+            self._store.clear_migration_transaction()
+            return True
+        raise DataMigrationError("registry_state_unknown")
 
     def migrate(
         self,
@@ -244,6 +366,8 @@ class DataMigrationService:
     ) -> MigrationResult:
         estimate = self.estimate(source, target_parent, create_recovery=create_recovery)
         try:
+            if self._store.read_migration_transaction() is not None:
+                raise DataMigrationError("migration_recovery_pending")
             if self._store.read_current() != source:
                 raise DataMigrationError("source_not_current")
             if self._store.read_pending_cleanup() is not None:
@@ -258,16 +382,30 @@ class DataMigrationService:
         target = estimate.target_root
         staging = target.with_name(f".eve-income-tracker-migrating-{uuid4().hex}")
         reference = DataRootReference(target, uuid4().hex, 1)
+        operation_id = staging.name.removeprefix(".eve-income-tracker-migrating-")
         created = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         identity = None
+        transaction = MigrationTransaction(
+            1, operation_id, source, reference, created, None
+        )
         renamed = False
         switch_attempted = False
         finalize_attempted = False
         pending_written = False
         phase = "staging_failed"
         try:
+            self._store.write_migration_transaction(transaction)
             staging.mkdir()
             identity = _directory_identity(staging)
+            transaction = MigrationTransaction(
+                transaction.version,
+                transaction.operation_id,
+                transaction.source,
+                transaction.target,
+                transaction.created_at,
+                identity,
+            )
+            self._store.write_migration_transaction(transaction)
             phase = "marker_failed"
             write_staged_data_root_marker(
                 staging, DataRootMarker(reference, created, "incomplete")
@@ -342,11 +480,16 @@ class DataMigrationService:
             if identity is not None:
                 try:
                     if renamed:
-                        self._quarantine(target, identity)
+                        self._quarantine(target, identity, transaction.operation_id)
                     else:
                         self._discard_staging(staging, identity)
                 except (OSError, ValueError, sqlite3.Error, RuntimeError):
                     raise DataMigrationError("cleanup_failed") from None
+            if not renamed:
+                try:
+                    self._store.clear_migration_transaction()
+                except (OSError, ValueError, sqlite3.Error, RuntimeError):
+                    raise DataMigrationError("registry_state_unknown") from None
             if rollback_failed:
                 raise DataMigrationError("registry_rollback_failed") from None
             if isinstance(exc, DataMigrationError):
@@ -355,6 +498,7 @@ class DataMigrationService:
 
         try:
             self._store.clear_pending_migration()
+            self._store.clear_migration_transaction()
         except (OSError, ValueError, sqlite3.Error, RuntimeError):
             raise DataMigrationError("cleanup_state_failed") from None
         try:
@@ -401,6 +545,9 @@ class DataMigrationService:
                 self._store.clear_pending_cleanup()
                 return True
             current = self._store.read_current()
+            if current == pending.reference:
+                self._store.clear_pending_cleanup()
+                return True
             if (
                 current is None
                 or current.root.resolve() == pending.reference.root.resolve()

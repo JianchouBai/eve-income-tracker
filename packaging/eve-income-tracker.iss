@@ -364,7 +364,8 @@ begin
     RegValueExists(HKCU, DataLocationKey, 'PendingMigrationTarget') or
     RegValueExists(HKCU, DataLocationKey, 'PendingMigrationCreateRecovery') or
     RegValueExists(HKCU, DataLocationKey, 'PendingCleanupRoot') or
-    RegValueExists(HKCU, DataLocationKey, 'PendingCleanupRootId') then
+    RegValueExists(HKCU, DataLocationKey, 'PendingCleanupRootId') or
+    RegValueExists(HKCU, DataLocationKey, 'MigrationTransaction') then
     Exit;
   if not HasRegistryType('DataRoot', RegistryStringType) or
     not HasRegistryType('DataRootId', RegistryStringType) or
@@ -457,7 +458,10 @@ begin
     if RegDeleteValue(HKCU, DataLocationKey, 'DataRoot') and
       RegDeleteValue(HKCU, DataLocationKey, 'DataRootId') and
       RegDeleteValue(HKCU, DataLocationKey, 'DataRootSchema') then
+    begin
+      RegDeleteValue(HKCU, DataLocationKey, 'MigrationTransaction');
       RegDeleteKeyIfEmpty(HKCU, DataLocationKey)
+    end
     else
       Log('Data removed, but location registry values could not be cleared.');
     Exit;

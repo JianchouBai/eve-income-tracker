@@ -322,6 +322,7 @@ class DataLocationController:
     ) -> DataRootReference:
         # Task 2 rolls an interrupted uncommitted switch back, or finishes the
         # committed journal. Do this before trying to start a new switch.
+        self._migration.reconcile_interrupted_migration()
         self._store.rollback_current_switch()
         current = self._store.read_current()
         if current is None:

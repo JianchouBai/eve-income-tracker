@@ -16,6 +16,7 @@ from app.data_location_store import (
     REG_SZ,
     DataLocationStoreError,
     MemoryDataLocationStore,
+    MigrationTransaction,
     PendingCleanup,
     PendingMigration,
     WindowsDataLocationStore,
@@ -80,6 +81,70 @@ def test_round_trip(tmp_path):
     s.clear_pending_cleanup()
     assert s.read_pending_migration() is None
     assert s.read_pending_cleanup() is None
+
+
+def test_migration_transaction_roundtrip_requires_durable_registry_value(tmp_path):
+    backend = Backend()
+    store = WindowsDataLocationStore(backend)
+    source = ref(tmp_path, "old")
+    target = ref(tmp_path, "new")
+    record = MigrationTransaction(
+        1,
+        "7ad53c3e6fa34bd6a37a7b6ec3683f5f",
+        source,
+        target,
+        "2026-10-04T00:00:00Z",
+        None,
+    )
+    store.write_migration_transaction(record)
+    assert backend.writes == ["MigrationTransaction"]
+    assert WindowsDataLocationStore(backend).read_migration_transaction() == record
+    store.clear_migration_transaction()
+    assert WindowsDataLocationStore(backend).read_migration_transaction() is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload.update(version=True),
+        lambda payload: payload.update(operation_id="not-a-uuid"),
+        lambda payload: payload.update(extra="unexpected"),
+        lambda payload: payload.update(staging_identity=[1]),
+        lambda payload: payload["source"].update(root="relative"),
+        lambda payload: payload["target"].update(schema=2),
+    ],
+)
+def test_migration_transaction_strict_decode_rejects_malformed_registry_json(
+    tmp_path, mutation
+):
+    import json
+
+    source = ref(tmp_path, "old")
+    target = ref(tmp_path, "new")
+    payload = {
+        "version": 1,
+        "operation_id": "7ad53c3e6fa34bd6a37a7b6ec3683f5f",
+        "source": {
+            "root": str(source.root),
+            "root_id": source.root_id,
+            "schema": 1,
+        },
+        "target": {
+            "root": str(target.root),
+            "root_id": target.root_id,
+            "schema": 1,
+        },
+        "created_at": "2026-10-04T00:00:00Z",
+        "staging_identity": None,
+    }
+    mutation(payload)
+    backend = Backend()
+    backend.values["MigrationTransaction"] = (
+        json.dumps(payload, separators=(",", ":")),
+        REG_SZ,
+    )
+
+    invalid(WindowsDataLocationStore(backend).read_migration_transaction)
 
 
 @pytest.mark.parametrize(

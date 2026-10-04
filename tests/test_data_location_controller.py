@@ -8,9 +8,11 @@ import pytest
 
 from app.data_location_controller import DataLocationController, DataLocationError
 from app.data_location_store import (
+    CURRENT_SWITCH_COMMITTED,
     MemoryDataLocationStore,
     PendingCleanup,
     PendingMigration,
+    WindowsDataLocationStore,
 )
 from app.data_roots import (
     MARKER_NAME,
@@ -60,6 +62,10 @@ class Interaction:
 
     def choose_existing_data_root(self):
         return next(self.roots, None)
+
+
+class SimulatedStartupDeath(BaseException):
+    pass
 
 
 def make_controller(tmp_path, store=None, validator=None):
@@ -678,6 +684,52 @@ def test_failed_pending_migration_keeps_original_and_request(tmp_path):
     assert paths.key_path.read_bytes() == b"protected-key"
     assert store.read_pending_migration().target_parent == parent
     assert (target / "foreign").read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "PreviousDataRoot",
+        "PendingMigrationTarget",
+        "PendingMigrationCreateRecovery",
+    ],
+)
+def test_startup_reconciles_committed_transaction_before_switch_journal_cleanup(
+    tmp_path, monkeypatch, field
+):
+    paths, original = existing(tmp_path)
+    parent = tmp_path / "target"
+    parent.mkdir()
+    store = MemoryDataLocationStore()
+    select(store, original)
+    controller = make_controller(tmp_path, store)
+    controller.schedule_migration(parent, create_recovery=False)
+    real_delete = store.backend.delete
+
+    def crash_after_boundary(name):
+        real_delete(name)
+        if name == field and (
+            field != "PreviousDataRoot"
+            or CURRENT_SWITCH_COMMITTED in store.backend.values
+        ):
+            raise SimulatedStartupDeath
+
+    monkeypatch.setattr(store.backend, "delete", crash_after_boundary)
+    with pytest.raises(SimulatedStartupDeath):
+        controller.execute_pending_migration()
+    monkeypatch.undo()
+    restarted_store = WindowsDataLocationStore(store.backend)
+    restarted = make_controller(tmp_path, restarted_store)
+
+    selected = restarted.resolve_startup(paths.data_root, Interaction())
+
+    assert selected.root == parent / "EVE Income Tracker"
+    assert restarted_store.read_migration_transaction() is None
+    assert restarted_store.read_pending_migration() is None
+    assert restarted_store.read_pending_cleanup() == PendingCleanup(original)
+    assert paths.data_root.exists()
+    assert restarted.execute_pending_migration() is None
+    assert not paths.data_root.exists()
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,25 @@ from zipfile import ZipFile
 import pytest
 
 from app import data_migration
-from app.data_location_store import MemoryDataLocationStore, PendingCleanup
+from app.data_location_store import (
+    CURRENT_SWITCH_COMMITTED,
+    DATA_ROOT,
+    DATA_ROOT_ID,
+    DATA_ROOT_SCHEMA,
+    MIGRATION_TRANSACTION,
+    PENDING_CLEANUP_ROOT,
+    PENDING_CLEANUP_ROOT_ID,
+    PENDING_MIGRATION_CREATE_RECOVERY,
+    PENDING_MIGRATION_TARGET,
+    PREVIOUS_DATA_ROOT,
+    PREVIOUS_DATA_ROOT_ABSENT,
+    PREVIOUS_DATA_ROOT_ID,
+    PREVIOUS_DATA_ROOT_SCHEMA,
+    MemoryDataLocationStore,
+    PendingCleanup,
+    PendingMigration,
+    WindowsDataLocationStore,
+)
 from app.data_migration import DataMigrationError, DataMigrationService
 from app.data_roots import (
     MARKER_NAME,
@@ -86,6 +104,298 @@ def source_bytes(paths):
 
 def fail(*args, **kwargs):
     raise OSError("secret key and private path must not leak")
+
+
+class SimulatedProcessDeath(BaseException):
+    pass
+
+
+def restarted_service(paths, store):
+    restarted_store = WindowsDataLocationStore(store.backend)
+    return restarted_store, service_for(paths, restarted_store)
+
+
+REGISTRY_CRASH_BOUNDARIES = [
+    ("delete", PREVIOUS_DATA_ROOT, 1, False),
+    ("delete", PREVIOUS_DATA_ROOT_ID, 1, False),
+    ("delete", PREVIOUS_DATA_ROOT_SCHEMA, 1, False),
+    ("delete", PREVIOUS_DATA_ROOT_ABSENT, 1, False),
+    ("write", MIGRATION_TRANSACTION, 1, False),
+    ("write", MIGRATION_TRANSACTION, 2, False),
+    ("write", PREVIOUS_DATA_ROOT_ID, 1, False),
+    ("write", PREVIOUS_DATA_ROOT_SCHEMA, 1, False),
+    ("write", PREVIOUS_DATA_ROOT, 1, False),
+    ("write", DATA_ROOT_SCHEMA, 1, False),
+    ("write", DATA_ROOT_ID, 1, False),
+    ("write", DATA_ROOT, 1, False),
+    ("write", PENDING_CLEANUP_ROOT_ID, 1, False),
+    ("write", PENDING_CLEANUP_ROOT, 1, False),
+    ("write", CURRENT_SWITCH_COMMITTED, 1, True),
+    ("delete", PREVIOUS_DATA_ROOT, 2, True),
+    ("delete", PREVIOUS_DATA_ROOT_ID, 2, True),
+    ("delete", PREVIOUS_DATA_ROOT_SCHEMA, 2, True),
+    ("delete", PREVIOUS_DATA_ROOT_ABSENT, 2, True),
+    ("delete", CURRENT_SWITCH_COMMITTED, 1, True),
+    ("delete", PENDING_MIGRATION_TARGET, 1, True),
+    ("delete", PENDING_MIGRATION_CREATE_RECOVERY, 1, True),
+    ("delete", MIGRATION_TRANSACTION, 1, True),
+]
+
+
+def test_transaction_is_durable_before_staging_directory_creation(
+    tmp_path, monkeypatch
+):
+    paths, reference, store, parent = make_source(tmp_path)
+    store.write_pending_migration(PendingMigration(parent, False))
+    real_mkdir = Path.mkdir
+
+    def crash_before_staging(path, *args, **kwargs):
+        if path.name.startswith(".eve-income-tracker-migrating-"):
+            transaction = store.read_migration_transaction()
+            assert transaction.source == reference
+            assert transaction.target.root == parent / "EVE Income Tracker"
+            assert transaction.staging_identity is None
+            raise SimulatedProcessDeath
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", crash_before_staging)
+    with pytest.raises(SimulatedProcessDeath):
+        service_for(paths, store).migrate(reference, parent, create_recovery=False)
+    restarted_store, restarted = restarted_service(paths, store)
+    restarted.reconcile_interrupted_migration()
+    assert restarted_store.read_current() == reference
+    assert restarted_store.read_migration_transaction() is None
+    assert restarted_store.read_pending_migration() == PendingMigration(parent, False)
+    assert list(parent.iterdir()) == []
+
+
+def test_staging_identity_is_durable_before_first_staging_bytes(tmp_path, monkeypatch):
+    paths, reference, store, parent = make_source(tmp_path)
+
+    def crash_before_marker(staging, marker):
+        transaction = store.read_migration_transaction()
+        assert transaction.staging_identity == data_migration._directory_identity(
+            staging
+        )
+        raise SimulatedProcessDeath
+
+    monkeypatch.setattr(
+        data_migration, "write_staged_data_root_marker", crash_before_marker
+    )
+    with pytest.raises(SimulatedProcessDeath):
+        service_for(paths, store).migrate(reference, parent, create_recovery=False)
+    transaction = store.read_migration_transaction()
+    staging = parent / f".eve-income-tracker-migrating-{transaction.operation_id}"
+    assert staging.is_dir()
+    restarted_store, restarted = restarted_service(paths, store)
+    restarted.reconcile_interrupted_migration()
+    assert restarted_store.read_current() == reference
+    assert restarted_store.read_migration_transaction() is None
+    assert not staging.exists()
+
+
+def test_crash_after_formal_rename_reconciles_precommit_operation(
+    tmp_path, monkeypatch
+):
+    paths, reference, store, parent = make_source(tmp_path)
+    store.write_pending_migration(PendingMigration(parent, False))
+    real_rename = data_migration.os.rename
+
+    def rename_then_crash(source, target):
+        real_rename(source, target)
+        if source.name.startswith(".eve-income-tracker-migrating-"):
+            raise SimulatedProcessDeath
+
+    monkeypatch.setattr(data_migration.os, "rename", rename_then_crash)
+    with pytest.raises(SimulatedProcessDeath):
+        service_for(paths, store).migrate(reference, parent, create_recovery=False)
+    assert (parent / "EVE Income Tracker").is_dir()
+    restarted_store, restarted = restarted_service(paths, store)
+    restarted.reconcile_interrupted_migration()
+    assert restarted_store.read_current() == reference
+    assert restarted_store.read_migration_transaction() is None
+    assert restarted_store.read_pending_migration() == PendingMigration(parent, False)
+    assert not (parent / "EVE Income Tracker").exists()
+    assert paths.key_path.read_bytes() == b"private protected key"
+
+
+@pytest.mark.parametrize(
+    ("method", "field", "occurrence", "committed"),
+    REGISTRY_CRASH_BOUNDARIES,
+)
+def test_every_registry_mutation_crash_boundary_converges_on_fresh_instance(
+    tmp_path, monkeypatch, method, field, occurrence, committed
+):
+    paths, reference, store, parent = make_source(tmp_path)
+    request = PendingMigration(parent, False)
+    store.write_pending_migration(request)
+    backend = store.backend
+    real_mutation = getattr(backend, method)
+    matched = 0
+
+    def crash_after_mutation(name, *args):
+        nonlocal matched
+        result = real_mutation(name, *args)
+        if name == field:
+            matched += 1
+            if matched == occurrence:
+                raise SimulatedProcessDeath
+        return result
+
+    monkeypatch.setattr(backend, method, crash_after_mutation)
+    with pytest.raises(SimulatedProcessDeath):
+        service_for(paths, store).migrate(reference, parent, create_recovery=False)
+    assert matched == occurrence
+    monkeypatch.undo()
+    restarted_store, restarted = restarted_service(paths, store)
+    restarted.reconcile_interrupted_migration()
+    assert restarted.reconcile_interrupted_migration() is False
+    assert restarted_store.read_migration_transaction() is None
+    if committed:
+        current = restarted_store.read_current()
+        assert current.root == parent / "EVE Income Tracker"
+        assert restarted_store.read_pending_migration() is None
+        assert restarted_store.read_pending_cleanup() == PendingCleanup(reference)
+        assert paths.data_root.exists()
+        assert restarted.retry_pending_cleanup() is True
+        assert not paths.data_root.exists()
+    else:
+        assert restarted_store.read_current() == reference
+        assert restarted_store.read_pending_migration() == request
+        assert restarted_store.read_pending_cleanup() is None
+        assert paths.key_path.read_bytes() == b"private protected key"
+        assert not (parent / "EVE Income Tracker").exists()
+    assert not list(parent.glob(".eve-income-tracker-migrating-*"))
+    assert not list(parent.glob(".eve-income-tracker-failed-*"))
+
+
+def test_committed_target_reconstructs_missing_cleanup_before_retiring_transaction(
+    tmp_path, monkeypatch
+):
+    paths, reference, store, parent = make_source(tmp_path)
+    store.write_pending_migration(PendingMigration(parent, False))
+    real_write = store.backend.write
+
+    def crash_after_commit(name, value, kind):
+        real_write(name, value, kind)
+        if name == CURRENT_SWITCH_COMMITTED:
+            raise SimulatedProcessDeath
+
+    monkeypatch.setattr(store.backend, "write", crash_after_commit)
+    with pytest.raises(SimulatedProcessDeath):
+        service_for(paths, store).migrate(reference, parent, create_recovery=False)
+    monkeypatch.undo()
+    store.clear_pending_cleanup()
+    restarted_store, restarted = restarted_service(paths, store)
+
+    assert restarted.reconcile_interrupted_migration() is True
+    assert restarted_store.read_pending_cleanup() == PendingCleanup(reference)
+    assert restarted_store.read_migration_transaction() is None
+    assert restarted_store.read_current().root == parent / "EVE Income Tracker"
+    assert paths.data_root.exists()
+
+
+def test_reconciliation_refuses_foreign_replacement_at_owned_staging_path(
+    tmp_path, monkeypatch
+):
+    paths, reference, store, parent = make_source(tmp_path)
+
+    def crash_before_marker(staging, marker):
+        raise SimulatedProcessDeath
+
+    monkeypatch.setattr(
+        data_migration, "write_staged_data_root_marker", crash_before_marker
+    )
+    with pytest.raises(SimulatedProcessDeath):
+        service_for(paths, store).migrate(reference, parent, create_recovery=False)
+    monkeypatch.undo()
+    transaction = store.read_migration_transaction()
+    staging = parent / f".eve-income-tracker-migrating-{transaction.operation_id}"
+    staging.rmdir()
+    staging.mkdir()
+    (staging / "foreign").write_bytes(b"keep")
+    restarted_store, restarted = restarted_service(paths, store)
+
+    with pytest.raises(DataMigrationError, match="cleanup_failed"):
+        restarted.reconcile_interrupted_migration()
+    assert (staging / "foreign").read_bytes() == b"keep"
+    assert restarted_store.read_current() == reference
+    assert restarted_store.read_migration_transaction() == transaction
+    assert paths.key_path.read_bytes() == b"private protected key"
+    with pytest.raises(DataMigrationError, match="migration_recovery_pending"):
+        restarted.migrate(reference, parent, create_recovery=False)
+    assert (staging / "foreign").read_bytes() == b"keep"
+    assert restarted_store.read_migration_transaction() == transaction
+
+
+def test_committed_reconciliation_refuses_target_directory_replacement(
+    tmp_path, monkeypatch
+):
+    paths, reference, store, parent = make_source(tmp_path)
+    store.write_pending_migration(PendingMigration(parent, False))
+    real_write = store.backend.write
+
+    def crash_after_commit(name, value, kind):
+        real_write(name, value, kind)
+        if name == CURRENT_SWITCH_COMMITTED:
+            raise SimulatedProcessDeath
+
+    monkeypatch.setattr(store.backend, "write", crash_after_commit)
+    with pytest.raises(SimulatedProcessDeath):
+        service_for(paths, store).migrate(reference, parent, create_recovery=False)
+    monkeypatch.undo()
+    transaction = store.read_migration_transaction()
+    target = transaction.target.root
+    displaced = target.with_name(".displaced-transaction-target")
+    target.rename(displaced)
+    target.mkdir()
+    write_data_root_marker(
+        target,
+        DataRootMarker(transaction.target, transaction.created_at, "ready"),
+    )
+    restarted_store, restarted = restarted_service(paths, store)
+
+    with pytest.raises(DataMigrationError, match="registry_state_unknown"):
+        restarted.reconcile_interrupted_migration()
+    assert restarted_store.read_migration_transaction() == transaction
+    assert restarted_store.read_current() == transaction.target
+    assert paths.key_path.read_bytes() == b"private protected key"
+    assert displaced.is_dir()
+
+
+def test_reconciliation_fails_closed_when_current_is_neither_transaction_endpoint(
+    tmp_path, monkeypatch
+):
+    paths, reference, store, parent = make_source(tmp_path)
+    real_mkdir = Path.mkdir
+
+    def crash_before_staging(path, *args, **kwargs):
+        if path.name.startswith(".eve-income-tracker-migrating-"):
+            raise SimulatedProcessDeath
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", crash_before_staging)
+    with pytest.raises(SimulatedProcessDeath):
+        service_for(paths, store).migrate(reference, parent, create_recovery=False)
+    monkeypatch.undo()
+    transaction = store.read_migration_transaction()
+    foreign_parent = tmp_path / "foreign-volume"
+    foreign_parent.mkdir()
+    foreign = DataRootReference(foreign_parent / "EVE Income Tracker", uuid4().hex, 1)
+    foreign.root.mkdir()
+    write_data_root_marker(
+        foreign.root, DataRootMarker(foreign, "2026-10-04T00:00:00Z", "ready")
+    )
+    store.begin_current_switch(foreign)
+    store.finalize_current_switch()
+    restarted_store, restarted = restarted_service(paths, store)
+
+    with pytest.raises(DataMigrationError, match="registry_state_unknown"):
+        restarted.reconcile_interrupted_migration()
+    assert restarted_store.read_current() == foreign
+    assert restarted_store.read_migration_transaction() == transaction
+    assert paths.key_path.read_bytes() == b"private protected key"
+    assert foreign.root.exists()
 
 
 def test_estimate_reports_copy_recovery_and_free_bytes_without_writes(
@@ -330,9 +640,11 @@ def test_cleanup_never_deletes_mismatched_or_current_roots(tmp_path, damage):
         store.finalize_current_switch()
     if damage == "marker":
         (reference.root / MARKER_NAME).unlink()
-    assert service.retry_pending_cleanup() is False
+    assert service.retry_pending_cleanup() is (damage == "current")
     assert paths.key_path.read_bytes() == b"private protected key"
-    assert store.read_pending_cleanup() == PendingCleanup(pending)
+    assert store.read_pending_cleanup() == (
+        None if damage == "current" else PendingCleanup(pending)
+    )
 
 
 @pytest.mark.parametrize(

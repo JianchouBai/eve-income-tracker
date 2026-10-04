@@ -81,6 +81,18 @@ def test_explicit_uninstall_requires_complete_current_registry_and_marker():
     assert "Pos('root_id'" not in script
 
 
+def test_uninstall_guards_and_clears_migration_transaction_registry_value():
+    script = read(ISS)
+    read_target = _inno_function(script, "ReadDeleteTarget")
+    uninstall = script.split("procedure CurUninstallStepChanged", 1)[1]
+
+    guard = "RegValueExists(HKCU, DataLocationKey, 'MigrationTransaction')"
+    cleanup = "RegDeleteValue(HKCU, DataLocationKey, 'MigrationTransaction')"
+    assert guard in read_target
+    assert cleanup in uninstall
+    assert uninstall.index("not DirExists(UserDataRoot)") < uninstall.index(cleanup)
+
+
 def assert_uninstall_delete_call_chain(script: str) -> None:
     validate = _inno_function(script, "ValidateDeleteTarget")
     initialize = _inno_function(script, "InitializeUninstall")
@@ -124,12 +136,15 @@ def test_uninstall_call_chain_test_detects_removed_security_step(removed):
     with pytest.raises(AssertionError):
         if removed == "Exec(":
             prefix, uninstall = script.split("procedure CurUninstallStepChanged", 1)
-            script = prefix + "procedure CurUninstallStepChanged" + uninstall.replace(
-                removed, "REMOVED(", 1
+            script = (
+                prefix
+                + "procedure CurUninstallStepChanged"
+                + uninstall.replace(removed, "REMOVED(", 1)
             )
         else:
             script = script.replace(removed, "REMOVED(", 1)
         assert_uninstall_delete_call_chain(script)
+
 
 def _inno_function(script: str, name: str) -> str:
     body = script.split(f"function {name}", 1)[1]
@@ -180,6 +195,7 @@ def test_installer_rejects_short_malformed_values_before_indexing():
     assert path.index("if Length(Root) < 5 then") < path.index("Root[2]")
     assert timestamp.index("if Length(Value) < 20 then") < timestamp.index("Value[5]")
 
+
 def test_installer_checks_and_bootstraps_official_webview2_runtime():
     script = read(ISS)
 
@@ -220,14 +236,22 @@ def test_installer_compiles_with_inno_setup_when_available(tmp_path):
     local_app_data = os.environ.get("LOCALAPPDATA")
     candidates = [
         shutil.which("ISCC.exe"),
-        *(Path(base) / "Inno Setup 7" / "ISCC.exe" for base in (
-            os.environ.get("ProgramFiles", ""),
-            os.environ.get("ProgramFiles(x86)", ""),
-        ) if base),
+        *(
+            Path(base) / "Inno Setup 7" / "ISCC.exe"
+            for base in (
+                os.environ.get("ProgramFiles", ""),
+                os.environ.get("ProgramFiles(x86)", ""),
+            )
+            if base
+        ),
     ]
     if local_app_data:
-        candidates.append(Path(local_app_data) / "Programs" / "Inno Setup 7" / "ISCC.exe")
-    compiler = next((Path(path) for path in candidates if path and Path(path).is_file()), None)
+        candidates.append(
+            Path(local_app_data) / "Programs" / "Inno Setup 7" / "ISCC.exe"
+        )
+    compiler = next(
+        (Path(path) for path in candidates if path and Path(path).is_file()), None
+    )
     if compiler is None:
         pytest.skip("Inno Setup 7 is unavailable")
 
@@ -262,6 +286,7 @@ def test_installer_compiles_with_inno_setup_when_available(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert (output / "EVE-Income-Tracker-1.0.0-x64-Setup.exe").is_file()
+
 
 def test_build_pipeline_has_fail_fast_release_gates_and_scoped_cleanup():
     script = read(BUILD)
