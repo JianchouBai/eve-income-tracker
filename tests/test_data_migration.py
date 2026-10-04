@@ -220,6 +220,75 @@ def test_reconcile_preserves_preexisting_empty_target_beside_staging(tmp_path):
     assert paths.key_path.read_bytes() == b"private protected key"
 
 
+def test_preexisting_empty_target_survives_crash_after_first_transaction_write(
+    tmp_path, monkeypatch
+):
+    paths, source, store, parent = make_source(tmp_path)
+    target = parent / "EVE Income Tracker"
+    target.mkdir()
+    target_identity = data_migration._directory_identity(target)
+    real_write = store.backend.write
+    with monkeypatch.context() as patch:
+
+        def write_then_die(name, value, kind):
+            real_write(name, value, kind)
+            if name == MIGRATION_TRANSACTION:
+                raise SimulatedProcessDeath
+
+        patch.setattr(store.backend, "write", write_then_die)
+        with pytest.raises(SimulatedProcessDeath):
+            service_for(paths, store).migrate(source, parent, create_recovery=False)
+
+    transaction = store.read_migration_transaction()
+    staging = parent / f".eve-income-tracker-migrating-{transaction.operation_id}"
+    assert transaction.staging_identity is None
+    assert not staging.exists()
+    restarted_store, service = restarted_service(paths, store)
+    assert service.reconcile_interrupted_migration() is True
+    assert restarted_store.read_migration_transaction() is None
+    assert data_migration._directory_identity(target) == target_identity
+    assert list(target.iterdir()) == []
+    assert paths.key_path.read_bytes() == b"private protected key"
+    _, second_restart = restarted_service(paths, store)
+    assert second_restart.reconcile_interrupted_migration() is False
+
+
+def test_preexisting_empty_target_survives_crash_after_staging_mkdir(
+    tmp_path, monkeypatch
+):
+    paths, source, store, parent = make_source(tmp_path)
+    target = parent / "EVE Income Tracker"
+    target.mkdir()
+    target_identity = data_migration._directory_identity(target)
+    real_mkdir = Path.mkdir
+    with monkeypatch.context() as patch:
+
+        def mkdir_then_die(path, *args, **kwargs):
+            result = real_mkdir(path, *args, **kwargs)
+            if path.name.startswith(".eve-income-tracker-migrating-"):
+                raise SimulatedProcessDeath
+            return result
+
+        patch.setattr(Path, "mkdir", mkdir_then_die)
+        with pytest.raises(SimulatedProcessDeath):
+            service_for(paths, store).migrate(source, parent, create_recovery=False)
+
+    transaction = store.read_migration_transaction()
+    staging = parent / f".eve-income-tracker-migrating-{transaction.operation_id}"
+    assert transaction.staging_identity is None
+    assert staging.is_dir()
+    assert list(staging.iterdir()) == []
+    restarted_store, service = restarted_service(paths, store)
+    assert service.reconcile_interrupted_migration() is True
+    assert restarted_store.read_migration_transaction() is None
+    assert not staging.exists()
+    assert data_migration._directory_identity(target) == target_identity
+    assert list(target.iterdir()) == []
+    assert paths.key_path.read_bytes() == b"private protected key"
+    _, second_restart = restarted_service(paths, store)
+    assert second_restart.reconcile_interrupted_migration() is False
+
+
 @pytest.mark.parametrize("location", ["staging", "formal", "diagnostic"])
 @pytest.mark.parametrize("change", ["root-id", "created-at"])
 def test_reconcile_refuses_changed_attempt_marker(tmp_path, location, change):
@@ -319,10 +388,14 @@ def test_reconcile_never_deletes_artifact_without_durable_identity(tmp_path, loc
         source, store, parent, location=location, identity=False, marker=False
     )
     artifact = transaction.target.root if location == "formal" else diagnostic
+    if location == "formal":
+        (artifact / "foreign").write_bytes(b"keep")
     restarted_store, service = restarted_service(paths, store)
     with pytest.raises((DataMigrationError, DataRootValidationError)):
         service.reconcile_interrupted_migration()
     assert artifact.is_dir()
+    if location == "formal":
+        assert (artifact / "foreign").read_bytes() == b"keep"
     assert restarted_store.read_migration_transaction() == transaction
 
 

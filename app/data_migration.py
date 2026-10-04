@@ -311,8 +311,10 @@ class DataMigrationService:
         details = target.lstat()
         if (
             not stat.S_ISDIR(details.st_mode)
-            or transaction.staging_identity is None
-            or _directory_identity(target) == transaction.staging_identity
+            or (
+                transaction.staging_identity is not None
+                and _directory_identity(target) == transaction.staging_identity
+            )
             or any(target.iterdir())
         ):
             raise DataMigrationError("cleanup_failed")
