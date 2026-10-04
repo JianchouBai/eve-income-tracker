@@ -1,5 +1,6 @@
 """Crash-safe removal of a committed migration source."""
 
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -506,6 +507,57 @@ def test_empty_root_delete_rechecks_identity_on_open_handle(tmp_path, monkeypatc
     with pytest.raises(OSError, match="identity changed"):
         windows_owned_delete.remove_empty_directory_bound(root, wrong_identity)
     assert real_stat(root).st_ino == details.st_ino
+
+
+def test_file_id_info_preserves_upper_64_file_id_bits():
+    volume_serial = 0x123456789ABCDEF0
+    file_id = 0x0102030405060708090A0B0C0D0E0F10
+
+    class Kernel:
+        def GetFileInformationByHandleEx(self, handle, info_class, output, size):
+            assert info_class == windows_owned_delete._FILE_ID_INFO_CLASS
+            info = ctypes.cast(
+                output, ctypes.POINTER(windows_owned_delete._FileIdInfo)
+            ).contents
+            info.volume_serial = volume_serial
+            for index, value in enumerate(file_id.to_bytes(16, "little")):
+                info.file_id.identifier[index] = value
+            return 1
+
+    assert windows_owned_delete._full_identity(Kernel(), object()) == (
+        volume_serial,
+        file_id,
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle deletion only")
+def test_empty_root_delete_rejects_upper_64_file_id_mismatch(tmp_path, monkeypatch):
+    root = tmp_path / "empty"
+    root.mkdir()
+    details = root.lstat()
+    real_kernel = windows_owned_delete._kernel32()
+
+    class KernelProxy:
+        def __getattr__(self, name):
+            return getattr(real_kernel, name)
+
+        def GetFileInformationByHandleEx(self, handle, info_class, output, size):
+            result = real_kernel.GetFileInformationByHandleEx(
+                handle, info_class, output, size
+            )
+            if result:
+                info = ctypes.cast(
+                    output, ctypes.POINTER(windows_owned_delete._FileIdInfo)
+                ).contents
+                info.file_id.identifier[15] = 1
+            return result
+
+    monkeypatch.setattr(windows_owned_delete, "_kernel32", KernelProxy)
+    with pytest.raises(OSError, match="identity changed"):
+        windows_owned_delete.remove_empty_directory_bound(
+            root, (details.st_dev, details.st_ino)
+        )
+    assert root.is_dir()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle deletion only")

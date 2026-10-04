@@ -115,13 +115,16 @@ def _information(kernel, handle) -> _ByHandleInformation:
     return info
 
 
-def _volume_serial(kernel, handle) -> int:
+def _full_identity(kernel, handle) -> tuple[int, int]:
     info = _FileIdInfo()
     if not kernel.GetFileInformationByHandleEx(
         handle, _FILE_ID_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
     ):
         raise OSError(ctypes.get_last_error())
-    return info.volume_serial
+    return (
+        info.volume_serial,
+        int.from_bytes(bytes(info.file_id.identifier), "little"),
+    )
 
 
 def _delete_opened(
@@ -203,10 +206,7 @@ def remove_empty_directory_bound(
             info = _information(kernel, handle)
             if not info.attributes & _FILE_ATTRIBUTE_DIRECTORY:
                 raise OSError("non-directory root")
-            opened_identity = (
-                _volume_serial(kernel, handle),
-                (info.index_high << 32) | info.index_low,
-            )
+            opened_identity = _full_identity(kernel, handle)
             if opened_identity != expected_identity:
                 raise OSError("directory identity changed")
             disposition = _Disposition(1)
