@@ -78,9 +78,7 @@ def test_python_marker_bytes_match_installer_exact_delete_contract(tmp_path):
     root.mkdir()
     root_id = "01234567-89ab-4cde-8abc-0123456789ab"
     created_at = "2026-01-02T03:04:05.123456Z"
-    marker = DataRootMarker(
-        DataRootReference(root, root_id, 1), created_at, "ready"
-    )
+    marker = DataRootMarker(DataRootReference(root, root_id, 1), created_at, "ready")
 
     write_data_root_marker(root, marker)
 
@@ -108,6 +106,7 @@ def test_python_marker_bytes_match_installer_exact_delete_contract(tmp_path):
     assert "Contents = Utf8Encode(Expected)" in script
     assert "DataAppId = '59D95F12-7D3B-4C8A-A57D-98F836769441'" in script
     assert "DataMarkerName = '.eve-income-tracker-data.json'" in script
+
 
 def test_release_config_validation_and_generated_copy_are_public_and_exact(tmp_path):
     source = tmp_path / "release-config.local.json"
