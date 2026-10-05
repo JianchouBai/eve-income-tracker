@@ -773,6 +773,42 @@ def test_migration_failure_info_reports_committed_target_and_cleanup_location(
     assert info.can_cancel is False
 
 
+def test_migration_failure_info_reports_owned_receipt_free_cleanup_root(tmp_path):
+    _, source = existing(tmp_path, "source")
+    _, target = existing(tmp_path, "target")
+    store = MemoryDataLocationStore()
+    select(store, target)
+    store.write_pending_cleanup(PendingCleanup(source))
+
+    info = make_controller(tmp_path, store).migration_failure_info("cleanup_failed")
+
+    assert info.source == source.root
+    assert info.target == target.root
+    assert info.leftover_paths == (source.root,)
+    assert info.can_cancel is False
+
+
+def test_migration_failure_info_omits_replaced_receipt_free_cleanup_root(tmp_path):
+    _, source = existing(tmp_path, "source")
+    _, target = existing(tmp_path, "target")
+    displaced = tmp_path / "displaced-owned-root"
+    source.root.rename(displaced)
+    source.root.mkdir()
+    foreign = source.root / "foreign.txt"
+    foreign.write_bytes(b"foreign")
+    store = MemoryDataLocationStore()
+    select(store, target)
+    store.write_pending_cleanup(PendingCleanup(source))
+
+    info = make_controller(tmp_path, store).migration_failure_info("cleanup_failed")
+
+    assert info.source == source.root
+    assert info.target == target.root
+    assert info.leftover_paths == ()
+    assert foreign.read_bytes() == b"foreign"
+    assert (displaced / "data/eve_income.sqlite3").is_file()
+
+
 @pytest.mark.parametrize("clear_committed", [False, True])
 def test_cancel_pending_migration_has_atomic_intent_status_on_registry_failure(
     tmp_path, monkeypatch, clear_committed

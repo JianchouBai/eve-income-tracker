@@ -41,6 +41,7 @@ from app.data_roots import (
     _validate_reference,
     data_root_from_parent,
     inspect_owned_data_root_removal_path,
+    prepare_owned_data_root_removal,
     read_data_root_marker,
     relocate_existing_data_root,
     validate_existing_data_root,
@@ -502,11 +503,20 @@ class DataLocationController:
             except Exception:  # noqa: BLE001, S110 - expose no invalid path.
                 pass
         if cleanup is not None:
-            cleanup_path = (
-                inspect_owned_data_root_removal_path(cleanup.removal)
-                if cleanup.removal is not None
-                else cleanup.reference.root
-            )
+            if cleanup.removal is not None:
+                cleanup_path = inspect_owned_data_root_removal_path(cleanup.removal)
+            else:
+                try:
+                    receipt = prepare_owned_data_root_removal(cleanup.reference)
+                except (
+                    DataRootValidationError,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                ):
+                    cleanup_path = None
+                else:
+                    cleanup_path = inspect_owned_data_root_removal_path(receipt)
             if cleanup_path is not None and cleanup_path != current.root:
                 leftovers.append(cleanup_path)
         return _MigrationState(
