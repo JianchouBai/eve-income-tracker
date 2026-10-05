@@ -5,7 +5,10 @@ import os
 import platform
 import re
 from pathlib import Path
-from typing import ClassVar, Protocol, Self
+from typing import TYPE_CHECKING, ClassVar, Protocol, Self
+
+if TYPE_CHECKING:
+    from app.data_location_controller import MigrationFailureInfo
 
 APP_TITLE = "EVE 收益追踪器"
 MUTEX_NAME = r"Local\EVEIncomeTracker.SingleInstance"
@@ -576,6 +579,25 @@ class NativeStartupInteraction:
 
     def ask_retry_locate_exit(self, code: str) -> str:
         return ask_retry_locate_exit(dialog=self._dialog)
+
+    def ask_migration_failure(self, info: MigrationFailureInfo) -> str:
+        leftovers = "\n".join(str(path) for path in info.leftover_paths) or "无"
+        message = (
+            f"数据迁移未完成（{info.code}）。\n"
+            f"原位置：{info.source}\n"
+            f"目标位置：{info.target}\n"
+            f"已确认属于本次迁移的残留：\n{leftovers}"
+        )
+        result = _location_choice(
+            message,
+            (
+                (101, "重试迁移"),
+                (102, "取消迁移并使用原位置"),
+                (103, "退出"),
+            ),
+            self._dialog,
+        )
+        return {101: "retry", 102: "cancel", 103: "exit", 2: "exit"}[result]
 
     def confirm_location(self, root: Path, estimate=None) -> bool:
         message = f"将使用以下完整数据目录：\n{root}"

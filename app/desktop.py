@@ -70,6 +70,10 @@ KEY_RECOVERY_QUESTION = (
     "角色、分组和钱包历史会保留，之后需要逐个重新授权。\n"
     "选择“否”将退出且不修改授权数据。"
 )
+COMMITTED_CLEANUP_WARNING = (
+    "数据位置已切换成功，但旧位置清理尚未完成。"
+    "应用将继续使用新位置；请在下次启动时重试清理。"
+)
 SMOKE_SUCCESS = "DESKTOP_SMOKE_OK healthz=200 home=200 resources=ok database=ok"
 SMOKE_RESULT_NAME = "desktop-smoke-result.txt"
 
@@ -428,6 +432,7 @@ class DesktopApplication:
                 server = None
                 window = None
                 logging_active = False
+                pending_recovery = False
                 window_closed = False
                 window_lock = threading.RLock()
                 callback_lock = threading.Lock()
@@ -475,41 +480,105 @@ class DesktopApplication:
                                     "Desktop cleanup failed: stage=window",
                                 )
 
+                def migration_action(error: DataLocationError) -> str:
+                    info = controller.migration_failure_info(error.code)
+                    if info.can_cancel:
+                        action = interaction.ask_migration_failure(info)
+                        if action in {"retry", "cancel", "exit"}:
+                            return action
+                        raise DesktopStartupError("startup_failed")
+                    status = controller.status()
+                    if (
+                        status.pending_cleanup is not None
+                        and status.current_path == info.target
+                        and status.current_path != status.pending_cleanup.reference.root
+                    ):
+                        return "committed"
+                    raise error
+
                 try:
-                    reference = controller.resolve_startup(
-                        defaults.data_root, interaction
-                    )
+                    skip_migration = False
+                    while True:
+                        try:
+                            reference = controller.resolve_startup(
+                                defaults.data_root, interaction
+                            )
+                            break
+                        except DataLocationError as error:
+                            if not (
+                                store.read_pending_migration()
+                                or store.read_pending_cleanup()
+                            ):
+                                raise
+                            action = migration_action(error)
+                            if action == "retry":
+                                continue
+                            if action == "exit":
+                                return None, False
+                            reference = (
+                                controller.cancel_pending_migration()
+                                if action == "cancel"
+                                else store.read_current()
+                            )
+                            skip_migration = True
+                            break
                     paths = resolve_app_paths(
                         frozen=True,
                         bundle_root=defaults.resource_root,
                         data_root=reference.root,
                     )
-                    recovery.sweep_stale_temps(paths)
                     pending = (
                         store.read_pending_migration() or store.read_pending_cleanup()
                     )
-                    progress = (
-                        dependencies.progress_factory()
-                        if pending and not self._smoke_test
-                        else None
-                    )
-                    try:
-                        if progress is not None:
-                            progress.show("preparing")
-                        result = controller.execute_pending_migration()
-                        if result is not None:
-                            reference = result.reference
-                            paths = resolve_app_paths(
-                                frozen=True,
-                                bundle_root=defaults.resource_root,
-                                data_root=result.reference.root,
-                            )
-                            recovery.sweep_stale_temps(paths)
-                        if progress is not None:
-                            progress.show("complete")
-                    finally:
-                        if progress is not None:
-                            progress.close()
+                    pending_recovery = bool(pending)
+                    swept_root = None
+                    if not pending:
+                        recovery.sweep_stale_temps(paths)
+                        swept_root = paths.data_root
+                    while True:
+                        if skip_migration:
+                            break
+                        pending = (
+                            store.read_pending_migration()
+                            or store.read_pending_cleanup()
+                        )
+                        progress = (
+                            dependencies.progress_factory()
+                            if pending and not self._smoke_test
+                            else None
+                        )
+                        migration_error = None
+                        result = None
+                        try:
+                            if progress is not None:
+                                progress.show("preparing")
+                            result = controller.execute_pending_migration()
+                            if progress is not None:
+                                progress.show("complete")
+                        except DataLocationError as error:
+                            migration_error = error
+                        finally:
+                            if progress is not None:
+                                progress.close()
+                        if migration_error is None:
+                            if result is not None:
+                                reference = result.reference
+                                paths = resolve_app_paths(
+                                    frozen=True,
+                                    bundle_root=defaults.resource_root,
+                                    data_root=reference.root,
+                                )
+                            break
+                        action = migration_action(migration_error)
+                        if action == "retry":
+                            continue
+                        if action == "cancel":
+                            reference = controller.cancel_pending_migration()
+                            break
+                        if action == "exit":
+                            return None, False
+                        if action == "committed":
+                            break
                     # The selected root is authoritative even when interrupted work
                     # completed its switch without returning a new migration result.
                     current = store.read_current()
@@ -520,7 +589,16 @@ class DesktopApplication:
                             bundle_root=defaults.resource_root,
                             data_root=current.root,
                         )
+                    if paths.data_root != swept_root:
                         recovery.sweep_stale_temps(paths)
+                    if store.read_pending_cleanup() is not None:
+                        status = controller.status()
+                        if (
+                            status.pending_cleanup is not None
+                            and status.current_path
+                            != status.pending_cleanup.reference.root
+                        ):
+                            dependencies.error_shower(COMMITTED_CLEANUP_WARNING)
                     logging_active = True
                     dependencies.logging_configurer(paths.logs_dir / DESKTOP_LOG_NAME)
                     if self._smoke_test:
@@ -662,7 +740,11 @@ class DesktopApplication:
                             stopped = False
                         if not stopped:
                             failure_code = failure_code or "shutdown_failed"
-                    if failure_code and paths is not None:
+                    if (
+                        failure_code
+                        and paths is not None
+                        and (logging_active or not pending_recovery)
+                    ):
                         logging.getLogger(__name__).warning(
                             "Desktop application failed: error_code=%s",
                             failure_code,
@@ -672,7 +754,12 @@ class DesktopApplication:
                             dependencies.logging_closer()
                         except Exception:  # noqa: BLE001 - sanitize native/runtime boundary failures.
                             failure_code = failure_code or "shutdown_failed"
-                    if failure_code and paths is not None and not self._smoke_test:
+                    if (
+                        failure_code
+                        and paths is not None
+                        and not self._smoke_test
+                        and (logging_active or not pending_recovery)
+                    ):
                         try:
                             recovery.record_failed_start(paths)
                         except Exception:  # noqa: BLE001 - sanitize native/runtime boundary failures.

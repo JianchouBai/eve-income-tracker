@@ -336,3 +336,51 @@ def test_native_migration_confirmation_exposes_space_and_cleanup(tmp_path):
     assert interaction.choose_existing_data_root() == tmp_path
     assert interaction.ask_retry_locate_exit("secret") == "retry"
     assert "secret" not in dialog.requests[-1][1]
+
+
+@pytest.mark.parametrize(
+    "answer,expected",
+    [(101, "retry"), (102, "cancel"), (103, "exit"), (2, "exit")],
+)
+def test_native_migration_failure_choice_uses_sanitized_controller_fields(
+    tmp_path, answer, expected
+):
+    from app.data_location_controller import MigrationFailureInfo
+    from app.windows_runtime import NativeStartupInteraction
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    leftover = tmp_path / "owned-staging"
+    info = MigrationFailureInfo("copy_failed", source, target, (leftover,), True)
+    dialog = FolderDialog(answer=answer)
+
+    assert (
+        NativeStartupInteraction(dialog=dialog).ask_migration_failure(info) == expected
+    )
+    title, message, options = dialog.requests[0]
+    assert title == APP_TITLE
+    assert options == (
+        (101, "重试迁移"),
+        (102, "取消迁移并使用原位置"),
+        (103, "退出"),
+    )
+    assert all(str(value) in message for value in (source, target, leftover))
+    assert "copy_failed" in message
+    assert "\\\\n" not in message
+    assert len(message.splitlines()) >= 4
+    assert "private exception" not in message
+
+
+@pytest.mark.parametrize("answer,fail", [(999, False), (101, True)])
+def test_native_migration_failure_dialog_failure_is_stable(tmp_path, answer, fail):
+    from app.data_location_controller import MigrationFailureInfo
+    from app.windows_runtime import NativeStartupInteraction
+
+    info = MigrationFailureInfo(
+        "copy_failed", tmp_path / "source", tmp_path / "target", (), True
+    )
+    with pytest.raises(WindowsRuntimeError, match="location_dialog_failed") as caught:
+        NativeStartupInteraction(
+            dialog=FolderDialog(answer=answer, fail=fail)
+        ).ask_migration_failure(info)
+    assert "secret native details" not in repr(caught.value)

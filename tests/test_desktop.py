@@ -1641,7 +1641,347 @@ def test_progress_closes_on_migration_failure_before_database_or_logging(tmp_pat
     )
     assert "database" not in names
     assert "log" not in names
-    assert names.count("failed_start") == 1
+    assert names.count("failed_start") == 0
+
+
+def _pending_migration_desktop(tmp_path, events, *, fail_copy=True):
+    from dataclasses import replace
+
+    from app.data_location_controller import DataLocationController
+    from app.data_location_store import PendingMigration
+    from app.key_store import FernetKeyStore
+    from app.migration_recovery import RecoverySnapshotService
+
+    dependencies, paths, _, _ = recording_dependencies(
+        tmp_path, events, real_database=True
+    )
+    store = MemoryDataLocationStore()
+    protector = _ProductionLikeProtector()
+    source = _registered_ready_root(
+        paths, store, protector.protect(Fernet.generate_key())
+    )
+    target_parent = tmp_path / "migration-target"
+    target_parent.mkdir()
+    store.write_pending_migration(PendingMigration(target_parent, False))
+    controllers = []
+
+    def controller_factory(location_store, **kwargs):
+        controller = DataLocationController(location_store, **kwargs)
+        controllers.append(controller)
+        if fail_copy:
+            original_copy = controller._migration._copy
+            attempts = 0
+
+            def copy_once_failed(*args):
+                nonlocal attempts
+                attempts += 1
+                events.append(("copy_attempt", attempts))
+                if attempts == 1:
+                    raise OSError("private migration exception")
+                return original_copy(*args)
+
+            controller._migration._copy = copy_once_failed
+        return controller
+
+    dependencies = replace(
+        dependencies,
+        data_location_factory=controller_factory,
+        data_location_store_factory=lambda: store,
+        recovery_factory=RecoverySnapshotService,
+        protector_factory=lambda: protector,
+        key_store_factory=FernetKeyStore,
+    )
+    return dependencies, paths, source, target_parent, store, controllers
+
+
+def test_real_controller_desktop_retry_opens_only_target_after_choice(tmp_path):
+    from dataclasses import replace
+
+    events = []
+    dependencies, paths, source, target_parent, store, controllers = (
+        _pending_migration_desktop(tmp_path, events)
+    )
+
+    def choose(info):
+        events.append(("migration_choice", info.code, info.can_cancel))
+        assert info.source == source.root
+        assert info.target == target_parent / APP_DATA_DIRECTORY
+        assert "log" not in event_names(events)
+        assert "database" not in event_names(events)
+        return "retry"
+
+    dependencies = replace(
+        dependencies,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_migration_failure=choose, choose_data_parent=lambda: None
+        ),
+    )
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 0
+    )
+    target = target_parent / APP_DATA_DIRECTORY
+    assert store.read_current().root == target
+    assert store.read_pending_migration() is None
+    assert not paths.data_root.exists()
+    assert target.joinpath("data", "eve_income.sqlite3").is_file()
+    assert len(controllers) == 1
+    names = event_names(events)
+    assert names.count("progress_close") == 2
+    assert (
+        names.index("progress_close")
+        < names.index("migration_choice")
+        < names.index("log")
+    )
+    assert names.index("migration_choice") < names.index("database")
+    assert (
+        next(e[1] for e in events if isinstance(e, tuple) and e[0] == "database")
+        == target / "data" / "eve_income.sqlite3"
+    )
+
+
+def test_real_controller_desktop_cancel_opens_original_source(tmp_path):
+    from dataclasses import replace
+
+    events = []
+    dependencies, paths, source, _, store, controllers = _pending_migration_desktop(
+        tmp_path, events
+    )
+
+    def choose(info):
+        events.append(("migration_choice", info.code, info.can_cancel))
+        assert info.can_cancel is True
+        return "cancel"
+
+    dependencies = replace(
+        dependencies,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_migration_failure=choose, choose_data_parent=lambda: None
+        ),
+    )
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 0
+    )
+    assert store.read_current() == source
+    assert store.read_pending_migration() is None
+    assert paths.database_path.is_file()
+    assert len(controllers) == 1
+    names = event_names(events)
+    assert (
+        names.index("progress_close")
+        < names.index("migration_choice")
+        < names.index("log")
+    )
+    assert (
+        next(e[1] for e in events if isinstance(e, tuple) and e[0] == "database")
+        == paths.database_path
+    )
+
+
+@pytest.mark.parametrize("action", ["exit", "invalid"])
+def test_real_controller_desktop_exit_or_invalid_choice_keeps_request_and_writers_closed(
+    tmp_path, action
+):
+    from dataclasses import replace
+
+    events = []
+    dependencies, _, source, _, store, _ = _pending_migration_desktop(tmp_path, events)
+
+    def choose(info):
+        events.append(("migration_choice", info.code, info.can_cancel))
+        return action
+
+    dependencies = replace(
+        dependencies,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_migration_failure=choose
+        ),
+    )
+    result = DesktopApplication(
+        local_app_data=tmp_path, dependencies=dependencies
+    ).run()
+    assert result == (0 if action == "exit" else 1)
+    assert store.read_current() == source
+    assert store.read_pending_migration() is not None
+    names = event_names(events)
+    assert (
+        names.index("progress_close")
+        < names.index("migration_choice")
+        < names.index("mutex_release")
+    )
+    assert not set(names) & {"log", "database", "key_store", "server_start", "window"}
+    assert "private migration exception" not in repr(events)
+
+
+def test_real_controller_desktop_dialog_failure_and_cancel_failure_close_writers(
+    tmp_path,
+):
+    from dataclasses import replace
+
+    events = []
+    dependencies, paths, source, _, store, _ = _pending_migration_desktop(
+        tmp_path, events
+    )
+
+    def fail_dialog(info):
+        events.append("migration_choice")
+        raise OSError("private dialog exception")
+
+    dependencies = replace(
+        dependencies,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_migration_failure=fail_dialog
+        ),
+    )
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 1
+    )
+    assert store.read_pending_migration() is not None
+    assert "private dialog exception" not in repr(events)
+    assert not set(event_names(events)) & {"log", "database", "server_start", "window"}
+
+    events.clear()
+
+    def deny_cancel(info):
+        paths.key_path.write_bytes(b"invalid")
+        events.append("migration_choice")
+        return "cancel"
+
+    dependencies = replace(
+        dependencies,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_migration_failure=deny_cancel
+        ),
+    )
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 1
+    )
+    assert store.read_current() == source
+    assert store.read_pending_migration() is not None
+    assert not set(event_names(events)) & {"log", "database", "server_start", "window"}
+
+
+def test_real_controller_committed_cleanup_warning_opens_only_target(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    import app.data_migration as migration
+    from app.data_location_controller import DataLocationController
+    from app.migration_recovery import RecoverySnapshotService
+
+    events = []
+    dependencies, paths, source, target_parent, store, _ = _pending_migration_desktop(
+        tmp_path, events, fail_copy=False
+    )
+    setup_controller = DataLocationController(
+        store,
+        resource_root=paths.resource_root,
+        default_parent=tmp_path,
+        existing_validator=lambda value: None,
+        recovery_service=RecoverySnapshotService(),
+    )
+
+    def fail_cleanup(*args):
+        raise OSError("private cleanup exception")
+
+    monkeypatch.setattr(migration, "resume_owned_data_root_removal", fail_cleanup)
+    result = setup_controller.execute_pending_migration()
+    assert result.reference.root == target_parent / APP_DATA_DIRECTORY
+    assert store.read_pending_cleanup() is not None
+
+    def forbidden_choice(info):
+        raise AssertionError("committed target must not offer cancellation")
+
+    dependencies = replace(
+        dependencies,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_migration_failure=forbidden_choice,
+            choose_data_parent=lambda: None,
+        ),
+    )
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 0
+    )
+    target = target_parent / APP_DATA_DIRECTORY
+    assert store.read_current().root == target
+    assert store.read_pending_cleanup() is not None
+    assert paths.data_root.exists()
+    warnings = [e[1] for e in events if isinstance(e, tuple) and e[0] == "error"]
+    assert len(warnings) == 1
+    assert str(source.root) not in warnings[0]
+    assert "private cleanup exception" not in warnings[0]
+    names = event_names(events)
+    assert (
+        names.index("progress_close") < names.index("error") < names.index("database")
+    )
+    assert (
+        next(e[1] for e in events if isinstance(e, tuple) and e[0] == "database")
+        == target / "data" / "eve_income.sqlite3"
+    )
+
+
+def test_real_controller_cancel_after_reconciliation_failure_keeps_journal(tmp_path):
+    from dataclasses import replace
+    from uuid import uuid4
+
+    from app.data_location_store import MigrationTransaction
+    from app.data_migration import DataMigrationError
+    from app.data_roots import DataRootReference
+
+    events = []
+    dependencies, paths, source, target_parent, store, controllers = (
+        _pending_migration_desktop(tmp_path, events, fail_copy=False)
+    )
+    transaction = MigrationTransaction(
+        1,
+        uuid4().hex,
+        source,
+        DataRootReference(target_parent / APP_DATA_DIRECTORY, uuid4().hex, 1),
+        "2026-10-02T00:00:00Z",
+        None,
+    )
+    store.write_migration_transaction(transaction)
+    original_factory = dependencies.data_location_factory
+
+    def controller_factory(location_store, **kwargs):
+        controller = original_factory(location_store, **kwargs)
+
+        def fail_reconciliation():
+            raise DataMigrationError("cleanup_failed")
+
+        controller._migration.reconcile_interrupted_migration = fail_reconciliation
+        return controller
+
+    def choose(info):
+        events.append(("migration_choice", info.code, info.can_cancel))
+        return "cancel"
+
+    dependencies = replace(
+        dependencies,
+        data_location_factory=controller_factory,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_migration_failure=choose, choose_data_parent=lambda: None
+        ),
+    )
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 0
+    )
+    assert len(controllers) == 1
+    assert store.read_current() == source
+    assert store.read_pending_migration() is None
+    assert store.read_migration_transaction() == transaction
+    assert (
+        next(e[1] for e in events if isinstance(e, tuple) and e[0] == "database")
+        == paths.database_path
+    )
+    names = event_names(events)
+    assert names.index("migration_choice") < names.index("log")
 
 
 def test_loaded_callback_failure_never_escapes_to_native_event_logger(tmp_path):
