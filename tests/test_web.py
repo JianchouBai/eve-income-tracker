@@ -1485,6 +1485,7 @@ class SettingsLocationFake:
     def __init__(self):
         self.pending = None
         self.cleanup = None
+        self.recovery_pending = False
         self.failure = None
         self.free = 200000
         self.calls = []
@@ -1511,6 +1512,7 @@ class SettingsLocationFake:
             self.recovery,
             pending_migration=self.pending,
             pending_cleanup=self.cleanup,
+            migration_recovery_pending=self.recovery_pending,
         )
 
     def estimate(self, parent, *, create_recovery=True):
@@ -1623,6 +1625,7 @@ def test_storage_status_estimate_schedule_and_idempotent_delete(storage_context)
                 "required_starts": 3,
             },
             "pending_migration": False,
+            "migration_recovery_pending": False,
             "pending_cleanup": False,
             "pending_cleanup_path": None,
             "busy": False,
@@ -1715,6 +1718,52 @@ def test_storage_rejects_non_json_and_duplicate_fields(
         )
         assert response.status_code == 400
         assert runtime.data_location.calls == []
+
+
+def test_storage_recovery_pending_status_is_sanitized(storage_context):
+    settings, services, clock, runtime = storage_context
+    runtime.data_location.recovery_pending = True
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        response = client.get("/api/desktop/data-location")
+        assert response.status_code == 200
+        assert response.json()["migration_recovery_pending"] is True
+        assert set(response.json()) == {
+            "current_path",
+            "volume",
+            "usage",
+            "recovery",
+            "pending_migration",
+            "pending_cleanup",
+            "pending_cleanup_path",
+            "migration_recovery_pending",
+            "busy",
+        }
+        assert "private-" not in response.text
+        assert response.json()["pending_migration"] is False
+
+
+@pytest.mark.parametrize("suffix", ["estimate", "migrations"])
+def test_storage_recovery_pending_error_is_stable(storage_context, suffix):
+    settings, services, clock, runtime = storage_context
+    error = DataLocationError("migration_recovery_pending")
+    error.args = ("private-registry private-transaction C:/private-file",)
+    runtime.data_location.failure = error
+    with TestClient(create_app(settings, services, clock, runtime)) as client:
+        launch_desktop(client, settings, runtime)
+        response = client.post(
+            "/api/desktop/data-location/" + suffix,
+            json={"target_parent": "E:/", "create_recovery": True},
+            headers=csrf_headers(client, settings),
+        )
+        assert response.status_code == 409
+        assert response.json() == {
+            "error": {
+                "code": "migration_recovery_pending",
+                "message": "迁移恢复尚未完成，请完全退出并重新启动应用；恢复完成前无法更改存储位置。",
+            }
+        }
+        assert runtime.data_location.pending is None
 
 
 def test_storage_insufficient_space_and_safe_failure(storage_context):

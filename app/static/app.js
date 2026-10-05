@@ -611,12 +611,14 @@ function bindDataSettings() {
 
   function availability() {
     const blocked = busy || status?.busy === true;
+    const recoveryPending = status?.migration_recovery_pending === true;
     dialog.setAttribute('aria-busy', String(busy));
     operations.forEach((id) => { $(id).disabled = blocked; });
     $('storage-open').disabled = blocked || !status;
-    $('storage-change').disabled = blocked || !status || status.pending_migration || status.pending_cleanup;
+    $('storage-change').disabled = blocked || recoveryPending || !status || status.pending_migration || status.pending_cleanup;
     $('storage-delete-recovery').disabled = blocked || !status?.recovery || status.pending_migration;
-    $('storage-confirm').disabled = blocked || !estimate || estimate.space_sufficient !== true || status?.pending_migration;
+    $('storage-confirm').disabled = blocked || recoveryPending || !estimate || estimate.space_sufficient !== true || status?.pending_migration;
+    $('storage-create-recovery').disabled = blocked || recoveryPending;
     $('storage-restart').disabled = blocked || !status?.pending_migration;
     $('storage-restart').hidden = !status?.pending_migration;
   }
@@ -643,6 +645,7 @@ function bindDataSettings() {
   }
 
   function renderStatus() {
+    $('storage-recovery-warning').hidden = status.migration_recovery_pending !== true;
     $('storage-current-path').textContent = status.current_path;
     $('storage-volume').textContent = status.volume;
     ['database', 'logs', 'backups', 'webview', 'config', 'other', 'total'].forEach((key) => {
@@ -668,6 +671,7 @@ function bindDataSettings() {
   }
 
   async function updateEstimate() {
+    if (status?.migration_recovery_pending === true) return;
     estimate = null;
     const result = await storageRequest('/estimate', 'POST', {
       target_parent: targetParent, create_recovery: $('storage-create-recovery').checked,
@@ -705,6 +709,7 @@ function bindDataSettings() {
     } catch { throw new Error('无法打开当前数据目录，请检查磁盘连接后重试。'); }
   }));
   $('storage-change').addEventListener('click', () => run(async () => {
+    if (status?.migration_recovery_pending === true) return;
     let selected;
     try { selected = await window.pywebview.api.choose_data_parent(); }
     catch { throw new Error('无法选择目录，请重试。'); }
@@ -731,6 +736,7 @@ function bindDataSettings() {
     $('storage-change').focus();
   });
   $('storage-confirm').addEventListener('click', () => {
+    if (status?.migration_recovery_pending === true) return;
     if (!estimate || estimate.space_sufficient !== true || !targetParent) return;
     return run(async () => {
       const scheduled = await storageRequest('/migrations', 'POST', {

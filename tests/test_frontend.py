@@ -340,6 +340,13 @@ def test_storage_dialog_is_desktop_only_and_versions_are_dynamic(tmp_path, monke
     assert "id='storage-error'" in page and "role='alert'" in page
     assert page.count("id='storage-cleanup-path'") == 1
     assert "待清理的原数据目录" in page
+    assert page.count("id='storage-recovery-warning'") == 1
+    warning = re.search(r"<p\b[^>]*id='storage-recovery-warning'[^>]*>(.*?)</p>", page)
+    assert warning is not None
+    assert "role='alert'" in warning.group(0)
+    assert "hidden" in warning.group(0)
+    assert "完全退出并重新启动应用" in warning.group(1)
+    assert "恢复完成前无法更改存储位置" in warning.group(1)
 
 
 def test_storage_javascript_flow_focus_failures_and_byte_formatting():
@@ -377,7 +384,8 @@ let failure = null, selected = 'E:/', pending = false;
 const status = {current_path:'D:/<unsafe>', volume:'D:', usage:{database:100, logs:20, backups:30,
   webview:10, config:5, other:5, recovery:40, total:210},
   recovery:{created_at:'2026-10-01T00:00:00Z', size_bytes:40, successful_starts:2,
-  retention_days:7, required_starts:3}, pending_migration:false, pending_cleanup:true, pending_cleanup_path:'F:/<leftover>/EVE Income Tracker', busy:false};
+  retention_days:7, required_starts:3}, pending_migration:false, migration_recovery_pending:false,
+  pending_cleanup:true, pending_cleanup_path:'F:/<leftover>/EVE Income Tracker', busy:false};
 global.window = {pywebview:{api:{
   async choose_data_parent() { calls.push('picker'); return selected; },
   async open_data_directory() { calls.push('open'); return true; },
@@ -395,7 +403,7 @@ global.fetch = async (path, options={}) => {
   }
   if (path.endsWith('/migrations')) { pending=true; data={scheduled:true,target_path:'E:/EVE Income Tracker'}; }
   if (path.endsWith('/recovery')) data={freed_bytes:40};
-  return {ok:true,json:async()=>data};
+  return {ok:true,json:async()=>JSON.parse(JSON.stringify(data))};
 };
 vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
 (async () => {
@@ -425,6 +433,47 @@ vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
   assert.equal(element('storage-confirmation').hidden,false);
   assert.equal(element('storage-target-path').textContent,'E:/EVE Income Tracker');
   assert.equal(document.activeElement.id,'storage-confirm');
+  status.migration_recovery_pending=true;
+  element('data-settings-dialog').close();
+  await element('settings-button').fire();
+  assert.equal(element('storage-recovery-warning').hidden,false);
+  for (const id of ['storage-change','storage-confirm','storage-create-recovery']) {
+    assert.equal(element(id).disabled,true, id);
+  }
+  status.pending_cleanup=true;
+  status.pending_cleanup_path='F:/<leftover>/EVE Income Tracker';
+  element('data-settings-dialog').close();
+  await element('settings-button').fire();
+  assert.equal(element('storage-current-path').textContent,'D:/<unsafe>');
+  assert.equal(element('storage-total').textContent,'210 B');
+  assert(element('storage-recovery-details').textContent.includes('40 B'));
+  assert.equal(element('storage-cleanup-notice').hidden,false);
+  assert.equal(element('storage-cleanup-path').textContent,'F:/<leftover>/EVE Income Tracker');
+  const beforeRecoveryActions=calls.length;
+  // Dispatch handlers even for disabled controls to exercise the request guards.
+  await element('storage-change').fire();
+  await element('storage-create-recovery').fire('change');
+  await element('storage-confirm').fire();
+  assert.equal(calls.length,beforeRecoveryActions);
+  status.migration_recovery_pending=false;
+  element('data-settings-dialog').close();
+  await element('settings-button').fire();
+  assert.equal(element('storage-recovery-warning').hidden,true);
+  assert.equal(element('storage-change').disabled,true); // Cleanup still guards changes.
+  status.pending_cleanup=false;
+  status.pending_cleanup_path=null;
+  status.busy=true;
+  element('data-settings-dialog').close();
+  await element('settings-button').fire();
+  for (const id of ['storage-change','storage-confirm','storage-create-recovery']) {
+    assert.equal(element(id).disabled,true, id);
+  }
+  status.busy=false;
+  element('data-settings-dialog').close();
+  await element('settings-button').fire();
+  for (const id of ['storage-change','storage-confirm','storage-create-recovery']) {
+    assert.equal(element(id).disabled,false, id);
+  }
   element('storage-create-recovery').checked=false;
   await element('storage-create-recovery').fire('change');
   assert.equal(element('storage-recovery-bytes').textContent,'0 B');
@@ -437,6 +486,10 @@ vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
   failure=null;
   await element('storage-confirm').fire();
   assert.equal(calls.at(-1),'restart');
+  assert.equal(element('storage-change').disabled,true);
+  assert.equal(element('storage-confirm').disabled,true);
+  assert.equal(element('storage-restart').disabled,false);
+  assert.equal(element('storage-restart').hidden,false);
   element('data-settings-dialog').close();
   assert.equal(document.activeElement.id,'settings-button');
 })().catch(error=>{console.error(error);process.exitCode=1;});

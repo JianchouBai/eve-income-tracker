@@ -367,6 +367,10 @@ def create_app(
                 "目标可用空间不足，请选择其他目录或取消恢复副本。",
             ),
             "migration_pending": (409, "已有待处理迁移，请重启应用完成迁移。"),
+            "migration_recovery_pending": (
+                409,
+                "迁移恢复尚未完成，请完全退出并重新启动应用；恢复完成前无法更改存储位置。",
+            ),
             "cleanup_pending": (409, "原数据目录尚未清理，请重启应用后重试。"),
             "path_invalid": (400, "目录无效，请选择完整的本地目录。"),
             "path_not_writable": (400, "目录不可写，请检查权限或选择其他目录。"),
@@ -457,6 +461,7 @@ def create_app(
                     "required_starts": 3,
                 },
                 "pending_migration": status.pending_migration is not None,
+                "migration_recovery_pending": status.migration_recovery_pending,
                 "pending_cleanup": status.pending_cleanup is not None,
                 "pending_cleanup_path": (
                     str(status.pending_cleanup_path)
