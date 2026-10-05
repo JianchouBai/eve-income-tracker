@@ -19,6 +19,7 @@ from uuid import uuid4
 from app.data_location_store import (
     DataLocationStore,
     DataLocationStoreError,
+    MigrationTransaction,
     PendingCleanup,
     PendingMigration,
 )
@@ -63,6 +64,57 @@ class DataLocationError(ValueError):
         super().__init__(code)
 
 
+_SAFE_MIGRATION_FAILURE_CODES = frozenset(
+    {
+        "cleanup_failed",
+        "cleanup_pending",
+        "cleanup_state_failed",
+        "copy_failed",
+        "database_invalid",
+        "destination_invalid",
+        "destination_reopen_failed",
+        "existing_data_invalid",
+        "file_verification_failed",
+        "location_missing",
+        "location_operation_failed",
+        "marker_failed",
+        "marker_incomplete",
+        "marker_invalid",
+        "marker_mismatch",
+        "migration_cancel_not_allowed",
+        "migration_pending",
+        "migration_recovery_pending",
+        "path_invalid",
+        "path_not_writable",
+        "path_reparse",
+        "path_unavailable",
+        "path_unsafe",
+        "recovery_failed",
+        "registry_failed",
+        "registry_finalize_failed",
+        "registry_invalid",
+        "registry_rollback_failed",
+        "registry_state_unknown",
+        "rename_failed",
+        "source_invalid",
+        "source_not_current",
+        "space_insufficient",
+        "staging_changed",
+        "staging_failed",
+        "target_not_empty",
+    }
+)
+
+
+@dataclass(frozen=True)
+class MigrationFailureInfo:
+    code: str
+    source: Path
+    target: Path
+    leftover_paths: tuple[Path, ...]
+    can_cancel: bool
+
+
 @dataclass(frozen=True)
 class DataLocationStatus:
     current_path: Path
@@ -71,6 +123,7 @@ class DataLocationStatus:
     recovery: RecoverySnapshotInfo | None
     pending_cleanup: PendingCleanup | None = None
     pending_migration: PendingMigration | None = None
+    migration_recovery_pending: bool = False
 
     @property
     def pending_cleanup_path(self) -> Path | None:
@@ -79,6 +132,17 @@ class DataLocationStatus:
         if self.pending_cleanup.removal is not None:
             return inspect_owned_data_root_removal_path(self.pending_cleanup.removal)
         return self.pending_cleanup.reference.root
+
+
+@dataclass(frozen=True)
+class _MigrationState:
+    current: DataRootReference
+    pending: PendingMigration | None
+    transaction: MigrationTransaction | None
+    cleanup: PendingCleanup | None
+    source: Path
+    target: Path
+    leftover_paths: tuple[Path, ...]
 
 
 class StartupInteraction(Protocol):
@@ -398,8 +462,121 @@ class DataLocationController:
             reference.root, DataRootMarker(reference, marker.created_at, "ready")
         )
 
+    def _read_migration_state(self) -> _MigrationState:
+        current = self._current()
+        pending = self._store.read_pending_migration()
+        transaction = self._store.read_migration_transaction()
+        cleanup = self._store.read_pending_cleanup()
+        request_target = (
+            data_root_from_parent(pending.target_parent)
+            if pending is not None
+            else None
+        )
+        source = current.root
+        target = request_target or current.root
+        if transaction is not None:
+            source = transaction.source.root
+            target = transaction.target.root
+        elif cleanup is not None and cleanup.reference != current:
+            source = cleanup.reference.root
+            target = current.root
+
+        leftovers: list[Path] = []
+        if transaction is not None:
+            try:
+                staging, formal, failed = self._migration._transaction_paths(
+                    transaction
+                )
+                candidates = [(staging, "staging")]
+                if current != transaction.target:
+                    candidates.append((formal, "formal"))
+                candidates.append((failed, "diagnostic"))
+                for path, kind in candidates:
+                    try:
+                        if self._migration._validate_transaction_path(
+                            path, transaction, kind
+                        ):
+                            leftovers.append(path)
+                    except Exception:  # noqa: BLE001, S112 - fail closed.
+                        continue
+            except Exception:  # noqa: BLE001, S110 - expose no invalid path.
+                pass
+        if cleanup is not None:
+            cleanup_path = (
+                inspect_owned_data_root_removal_path(cleanup.removal)
+                if cleanup.removal is not None
+                else cleanup.reference.root
+            )
+            if cleanup_path is not None and cleanup_path != current.root:
+                leftovers.append(cleanup_path)
+        return _MigrationState(
+            current,
+            pending,
+            transaction,
+            cleanup,
+            source,
+            target,
+            tuple(dict.fromkeys(leftovers)),
+        )
+
+    def _state_can_cancel(self, state: _MigrationState) -> bool:
+        if state.pending is None or state.source != state.current.root:
+            return False
+        try:
+            request_target = data_root_from_parent(state.pending.target_parent)
+            if state.current.root == request_target:
+                return False
+            if state.transaction is not None and (
+                state.transaction.source != state.current
+                or state.transaction.target.root != request_target
+            ):
+                return False
+            self._validate(state.current)
+            return (
+                self._store.read_current() == state.current
+                and self._store.read_pending_migration() == state.pending
+                and self._store.read_migration_transaction() == state.transaction
+            )
+        except Exception:  # noqa: BLE001 - a cancellation predicate fails closed.
+            return False
+
+    @_safe_operation
+    def migration_failure_info(self, code: str) -> MigrationFailureInfo:
+        state = self._read_migration_state()
+        safe_code = (
+            code
+            if isinstance(code, str) and code in _SAFE_MIGRATION_FAILURE_CODES
+            else "location_operation_failed"
+        )
+        return MigrationFailureInfo(
+            safe_code,
+            state.source,
+            state.target,
+            state.leftover_paths,
+            self._state_can_cancel(state),
+        )
+
+    @_safe_operation
+    def cancel_pending_migration(self) -> DataRootReference:
+        state = self._read_migration_state()
+        if not self._state_can_cancel(state):
+            raise DataLocationError("migration_cancel_not_allowed")
+        try:
+            self._store.clear_pending_migration()
+        except (OSError, ValueError, RuntimeError):
+            try:
+                if self._store.read_pending_migration() is None:
+                    return state.current
+            except (OSError, ValueError, RuntimeError):
+                pass
+            raise DataLocationError("registry_failed") from None
+        if self._store.read_pending_migration() is not None:
+            raise DataLocationError("registry_failed")
+        return state.current
+
     @_safe_operation
     def execute_pending_migration(self) -> MigrationResult | None:
+        self._migration.reconcile_interrupted_migration()
         pending = self._store.read_pending_migration()
         if pending is None:
             # Retire recovery-only residue from an interrupted write/clear.
@@ -444,6 +621,8 @@ class DataLocationController:
     def schedule_migration(
         self, target_parent: Path, *, create_recovery: bool = True
     ) -> MigrationEstimate:
+        if self._store.read_migration_transaction() is not None:
+            raise DataLocationError("migration_recovery_pending")
         if self._store.read_pending_cleanup() is not None:
             raise DataLocationError("cleanup_pending")
         if self._store.read_pending_migration() is not None:
@@ -484,12 +663,15 @@ class DataLocationController:
             usage[category] += path.stat().st_size
         usage["total"] = sum(usage.values())
         return DataLocationStatus(
-            current.root,
-            current.root.anchor,
-            usage,
-            recovery,
-            self._store.read_pending_cleanup(),
-            self._store.read_pending_migration(),
+            current_path=current.root,
+            volume=current.root.anchor,
+            usage=usage,
+            recovery=recovery,
+            pending_cleanup=self._store.read_pending_cleanup(),
+            pending_migration=self._store.read_pending_migration(),
+            migration_recovery_pending=(
+                self._store.read_migration_transaction() is not None
+            ),
         )
 
     @_safe_operation

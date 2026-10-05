@@ -10,6 +10,7 @@ from app.data_location_controller import DataLocationController, DataLocationErr
 from app.data_location_store import (
     CURRENT_SWITCH_COMMITTED,
     MemoryDataLocationStore,
+    MigrationTransaction,
     PendingCleanup,
     PendingMigration,
     WindowsDataLocationStore,
@@ -18,6 +19,7 @@ from app.data_roots import (
     MARKER_NAME,
     DataRootMarker,
     DataRootReference,
+    prepare_owned_data_root_removal,
     read_data_root_marker,
     write_data_root_marker,
 )
@@ -684,6 +686,136 @@ def test_failed_pending_migration_keeps_original_and_request(tmp_path):
     assert paths.key_path.read_bytes() == b"protected-key"
     assert store.read_pending_migration().target_parent == parent
     assert (target / "foreign").read_bytes() == b"keep"
+
+
+def test_migration_failure_info_sanitizes_code_and_reports_transaction_path(
+    tmp_path,
+):
+    _, current = existing(tmp_path)
+    parent = tmp_path / "target"
+    parent.mkdir()
+    store = MemoryDataLocationStore()
+    select(store, current)
+    request = PendingMigration(parent, False)
+    store.write_pending_migration(request)
+    operation_id = uuid4().hex
+    target = DataRootReference(parent / "EVE Income Tracker", uuid4().hex, 1)
+    transaction = MigrationTransaction(
+        1,
+        operation_id,
+        current,
+        target,
+        "2026-10-02T00:00:00Z",
+        None,
+    )
+    store.write_migration_transaction(transaction)
+    staging = target.root.with_name(f".eve-income-tracker-migrating-{operation_id}")
+    staging.mkdir()
+
+    info = make_controller(tmp_path, store).migration_failure_info(
+        "private_failure_with_sensitive_detail"
+    )
+
+    assert info.code == "location_operation_failed"
+    assert info.source == current.root
+    assert info.target == target.root
+    assert info.leftover_paths == (staging,)
+    assert info.can_cancel is True
+    assert current.root_id not in repr(info)
+    assert target.root_id not in repr(info)
+    assert "sensitive_detail" not in repr(info)
+
+
+def test_migration_failure_info_does_not_report_unowned_target_as_leftover(tmp_path):
+    _, current = existing(tmp_path)
+    parent = tmp_path / "target"
+    parent.mkdir()
+    target = DataRootReference(parent / "EVE Income Tracker", uuid4().hex, 1)
+    target.root.mkdir()
+    (target.root / "foreign.txt").write_bytes(b"foreign")
+    store = MemoryDataLocationStore()
+    select(store, current)
+    store.write_pending_migration(PendingMigration(parent, False))
+    store.write_migration_transaction(
+        MigrationTransaction(
+            1,
+            uuid4().hex,
+            current,
+            target,
+            "2026-10-02T00:00:00Z",
+            None,
+        )
+    )
+
+    info = make_controller(tmp_path, store).migration_failure_info("cleanup_failed")
+
+    assert info.target == target.root
+    assert info.leftover_paths == ()
+    assert (target.root / "foreign.txt").read_bytes() == b"foreign"
+
+
+def test_migration_failure_info_reports_committed_target_and_cleanup_location(
+    tmp_path,
+):
+    _, source = existing(tmp_path, "source")
+    _, target = existing(tmp_path, "target")
+    receipt = prepare_owned_data_root_removal(source)
+    source.root.rename(receipt.quarantine)
+    store = MemoryDataLocationStore()
+    select(store, target)
+    store.write_pending_cleanup(PendingCleanup(source, receipt))
+
+    info = make_controller(tmp_path, store).migration_failure_info("cleanup_failed")
+
+    assert info.source == source.root
+    assert info.target == target.root
+    assert info.leftover_paths == (receipt.quarantine,)
+    assert info.can_cancel is False
+
+
+@pytest.mark.parametrize("clear_committed", [False, True])
+def test_cancel_pending_migration_has_atomic_intent_status_on_registry_failure(
+    tmp_path, monkeypatch, clear_committed
+):
+    _, source = existing(tmp_path)
+    parent = tmp_path / "target"
+    parent.mkdir()
+    store = MemoryDataLocationStore()
+    select(store, source)
+    request = PendingMigration(parent, False)
+    store.write_pending_migration(request)
+    transaction = MigrationTransaction(
+        1,
+        uuid4().hex,
+        source,
+        DataRootReference(parent / "EVE Income Tracker", uuid4().hex, 1),
+        "2026-10-02T00:00:00Z",
+        None,
+    )
+    store.write_migration_transaction(transaction)
+    real_delete = store.backend.delete
+
+    def fail_target_clear(name):
+        if name == "PendingMigrationTarget":
+            if clear_committed:
+                real_delete(name)
+            raise OSError("private registry failure")
+        real_delete(name)
+
+    monkeypatch.setattr(store.backend, "delete", fail_target_clear)
+    controller = make_controller(tmp_path, store)
+    if clear_committed:
+        assert controller.cancel_pending_migration() == source
+    else:
+        with pytest.raises(DataLocationError, match="registry_failed") as caught:
+            controller.cancel_pending_migration()
+        assert "private" not in repr(caught.value)
+
+    status = controller.status()
+    assert status.pending_migration == (None if clear_committed else request)
+    assert status.migration_recovery_pending is True
+    assert store.read_migration_transaction() == transaction
+    assert store.read_current() == source
 
 
 @pytest.mark.parametrize(
