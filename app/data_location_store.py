@@ -358,8 +358,14 @@ class _WindowsRegistryBackend:
 
     def write(self, name: str, value: object, kind: int) -> None:
         w = self.winreg
-        with w.CreateKeyEx(w.HKEY_CURRENT_USER, REGISTRY_KEY) as key:
+        access = w.KEY_WRITE
+        if name == PENDING_CLEANUP_QUARANTINE:
+            access |= w.KEY_QUERY_VALUE
+        with w.CreateKeyEx(w.HKEY_CURRENT_USER, REGISTRY_KEY, 0, access) as key:
             w.SetValueEx(key, name, 0, kind, value)
+            if name == PENDING_CLEANUP_QUARANTINE:
+                # Persist the receipt and its preceding root/ID before rename.
+                w.FlushKey(key)
 
     def delete(self, name: str) -> None:
         w = self.winreg

@@ -119,6 +119,45 @@ def assert_uninstall_delete_call_chain(script: str) -> None:
     )
 
 
+def test_uninstall_passes_pending_cleanup_to_helper_without_parsing_receipt():
+    script = read(ISS)
+    read_target = _inno_function(script, "ReadDeleteTarget")
+    validate = _inno_function(script, "ValidateDeleteTarget")
+    for field in (
+        "PendingCleanupRoot",
+        "PendingCleanupRootId",
+        "PendingCleanupQuarantine",
+    ):
+        assert field not in read_target
+    pending = _inno_function(script, "HasPendingCleanupState")
+    assert pending.count("RegValueExists(") == 3
+    assert pending.count(") or") == 2
+    assert "RegQuery" not in pending
+    assert "(HasPendingCleanupState or" in validate
+    assert "IsSafeDataRoot(CurrentRoot) and" in validate
+    assert "IsCanonicalMarker(CurrentRoot, CurrentId)" in validate
+    assert_uninstall_delete_call_chain(script)
+
+
+def test_uninstall_clears_complete_cleanup_journal_only_after_helper_success():
+    script = read(ISS)
+    uninstall = script.split("procedure CurUninstallStepChanged", 1)[1]
+    success = uninstall.index("ResultCode = 0")
+    absent = uninstall.index("not DirExists(UserDataRoot)")
+    absent_file = uninstall.index("not FileExists(UserDataRoot)")
+    for field in (
+        "DataRoot",
+        "DataRootId",
+        "DataRootSchema",
+        "PendingCleanupRoot",
+        "PendingCleanupRootId",
+        "PendingCleanupQuarantine",
+    ):
+        deleted = uninstall.index(f"RegDeleteValue(HKCU, DataLocationKey, '{field}')")
+        assert success < absent < absent_file < deleted
+    assert "DelTree(" not in uninstall
+
+
 def test_uninstall_delete_call_chain_uses_marker_and_early_bound_helper():
     assert_uninstall_delete_call_chain(read(ISS))
 

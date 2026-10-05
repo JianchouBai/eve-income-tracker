@@ -363,9 +363,6 @@ begin
     RegValueExists(HKCU, DataLocationKey, 'CurrentSwitchCommitted') or
     RegValueExists(HKCU, DataLocationKey, 'PendingMigrationTarget') or
     RegValueExists(HKCU, DataLocationKey, 'PendingMigrationCreateRecovery') or
-    RegValueExists(HKCU, DataLocationKey, 'PendingCleanupRoot') or
-    RegValueExists(HKCU, DataLocationKey, 'PendingCleanupRootId') or
-    RegValueExists(HKCU, DataLocationKey, 'PendingCleanupQuarantine') or
     RegValueExists(HKCU, DataLocationKey, 'MigrationTransaction') then
     Exit;
   if not HasRegistryType('DataRoot', RegistryStringType) or
@@ -380,6 +377,15 @@ begin
     (DataRootSchema = 1) and IsUuidV4(RootId);
 end;
 
+function HasPendingCleanupState: Boolean;
+begin
+  { The helper alone validates complete, partial, or malformed receipts. }
+  Result :=
+    RegValueExists(HKCU, DataLocationKey, 'PendingCleanupRoot') or
+    RegValueExists(HKCU, DataLocationKey, 'PendingCleanupRootId') or
+    RegValueExists(HKCU, DataLocationKey, 'PendingCleanupQuarantine');
+end;
+
 function ValidateDeleteTarget(const ExpectedRoot, ExpectedId: String): Boolean;
 var
   CurrentRoot, CurrentId: String;
@@ -388,8 +394,9 @@ begin
     ReadDeleteTarget(CurrentRoot, CurrentId) and
     (CurrentRoot = ExpectedRoot) and
     (CurrentId = ExpectedId) and
-    IsSafeDataRoot(CurrentRoot) and
-    IsCanonicalMarker(CurrentRoot, CurrentId);
+    (HasPendingCleanupState or
+      (IsSafeDataRoot(CurrentRoot) and
+        IsCanonicalMarker(CurrentRoot, CurrentId)));
 end;
 
 function InitializeUninstall: Boolean;
@@ -454,13 +461,16 @@ begin
     SW_HIDE,
     ewWaitUntilTerminated,
     ResultCode
-  ) and (ResultCode = 0) and (not DirExists(UserDataRoot)) then
+  ) and (ResultCode = 0) and (not DirExists(UserDataRoot)) and
+    (not FileExists(UserDataRoot)) then
   begin
     if RegDeleteValue(HKCU, DataLocationKey, 'DataRoot') and
       RegDeleteValue(HKCU, DataLocationKey, 'DataRootId') and
       RegDeleteValue(HKCU, DataLocationKey, 'DataRootSchema') then
     begin
       RegDeleteValue(HKCU, DataLocationKey, 'MigrationTransaction');
+      RegDeleteValue(HKCU, DataLocationKey, 'PendingCleanupRoot');
+      RegDeleteValue(HKCU, DataLocationKey, 'PendingCleanupRootId');
       RegDeleteValue(HKCU, DataLocationKey, 'PendingCleanupQuarantine');
       RegDeleteKeyIfEmpty(HKCU, DataLocationKey)
     end

@@ -23,13 +23,15 @@ from app.data_location_store import (
     PREVIOUS_DATA_ROOT_SCHEMA,
     REG_DWORD,
     REG_SZ,
+    PendingCleanup,
     RegistryBackend,
     WindowsDataLocationStore,
 )
 from app.data_roots import (
     DataRootReference,
     DataRootValidationError,
-    remove_owned_data_root,
+    prepare_owned_data_root_removal,
+    resume_owned_data_root_removal,
 )
 
 _CURRENT = (DATA_ROOT, DATA_ROOT_ID, DATA_ROOT_SCHEMA)
@@ -42,11 +44,13 @@ _UNSTABLE = (
     MIGRATION_TRANSACTION,
     PENDING_MIGRATION_TARGET,
     PENDING_MIGRATION_CREATE_RECOVERY,
+)
+_CLEANUP = (
     PENDING_CLEANUP_ROOT,
     PENDING_CLEANUP_ROOT_ID,
     PENDING_CLEANUP_QUARANTINE,
 )
-_ALL = _CURRENT + _UNSTABLE
+_ALL = _CURRENT + _UNSTABLE + _CLEANUP
 
 
 def cleanup_uninstall_data(
@@ -57,7 +61,9 @@ def cleanup_uninstall_data(
 ) -> int:
     """Return zero only after exact current state and owned tree removal.
 
-    The caller owns registry deletion. Every failure leaves it untouched.
+    The caller owns final registry deletion. Failures and interruptions retain
+    any published receipt; success also retains it until Inno clears the registry.
+    A rerun resumes only that exact journal, including after completed deletion.
     """
     try:
         if not isinstance(expected_root, str) or not isinstance(expected_id, str):
@@ -72,7 +78,8 @@ def cleanup_uninstall_data(
             or expected_id not in (str(root_uuid), root_uuid.hex)
         ):
             return 2
-        backend = WindowsDataLocationStore(registry_backend).backend
+        store = WindowsDataLocationStore(registry_backend)
+        backend = store.backend
         snapshot = {name: backend.read(name) for name in _ALL}
         if any(snapshot[name] is not None for name in _UNSTABLE):
             return 2
@@ -84,7 +91,57 @@ def cleanup_uninstall_data(
             return 2
         if any(backend.read(name) != snapshot[name] for name in _ALL):
             return 2
-        remove_owned_data_root(DataRootReference(root, expected_id, 1))
-        return 0 if not os.path.lexists(root) else 2
+        reference = DataRootReference(root, expected_id, 1)
+        if any(snapshot[name] is not None for name in _CLEANUP):
+            if any(snapshot[name] is None for name in _CLEANUP):
+                return 2
+            pending = store.read_pending_cleanup()
+            if (
+                pending is None
+                or pending.reference != reference
+                or pending.removal is None
+                or snapshot[PENDING_CLEANUP_ROOT] != (expected_root, REG_SZ)
+                or snapshot[PENDING_CLEANUP_ROOT_ID] != (expected_id, REG_SZ)
+            ):
+                return 2
+            if any(backend.read(name) != snapshot[name] for name in _ALL):
+                return 2
+            # A prior flush may have failed with the receipt still cached.
+            # Rewriting its exact bytes makes retries cross the same barrier.
+            backend.write(
+                PENDING_CLEANUP_QUARANTINE, *snapshot[PENDING_CLEANUP_QUARANTINE]
+            )
+        else:
+            pending = PendingCleanup(
+                reference, prepare_owned_data_root_removal(reference)
+            )
+            if any(backend.read(name) != snapshot[name] for name in _ALL):
+                return 2
+            store.write_pending_cleanup(pending)
+
+        journal = {name: backend.read(name) for name in _ALL}
+        if (
+            any(journal[name] != snapshot[name] for name in _CURRENT + _UNSTABLE)
+            or journal[PENDING_CLEANUP_ROOT] != (expected_root, REG_SZ)
+            or journal[PENDING_CLEANUP_ROOT_ID] != (expected_id, REG_SZ)
+            or store.read_pending_cleanup() != pending
+            or any(backend.read(name) != journal[name] for name in _ALL)
+        ):
+            return 2
+        receipt = pending.removal
+        # Migration cleanup may retain a foreign original while deleting its
+        # quarantine. Explicit uninstall instead refuses that ambiguous state.
+        if os.path.lexists(root):
+            details = root.lstat()
+            if (details.st_dev, details.st_ino) != receipt.identity:
+                return 2
+        resume_owned_data_root_removal(receipt)
+        if (
+            os.path.lexists(root)
+            or os.path.lexists(receipt.quarantine)
+            or any(backend.read(name) != journal[name] for name in _ALL)
+        ):
+            return 2
+        return 0
     except (DataRootValidationError, OSError, RuntimeError, TypeError, ValueError):
         return 2
