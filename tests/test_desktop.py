@@ -1925,6 +1925,100 @@ def test_real_controller_committed_cleanup_warning_opens_only_target(
     )
 
 
+def test_real_controller_mixed_committed_cleanup_and_transaction_fails_closed(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+    from uuid import uuid4
+
+    import app.data_migration as migration
+    from app.data_location_controller import DataLocationController
+    from app.data_location_store import MigrationTransaction
+    from app.data_migration import DataMigrationError
+    from app.migration_recovery import RecoverySnapshotService
+
+    events = []
+    dependencies, paths, source, target_parent, store, _ = _pending_migration_desktop(
+        tmp_path, events, fail_copy=False
+    )
+    setup_controller = DataLocationController(
+        store,
+        resource_root=paths.resource_root,
+        default_parent=tmp_path,
+        existing_validator=lambda value: None,
+        recovery_service=RecoverySnapshotService(),
+    )
+
+    def fail_cleanup(*args):
+        raise OSError("private cleanup exception")
+
+    monkeypatch.setattr(migration, "resume_owned_data_root_removal", fail_cleanup)
+    result = setup_controller.execute_pending_migration()
+    target = store.read_current()
+    assert result.reference == target
+    assert target.root == target_parent / APP_DATA_DIRECTORY
+    assert store.read_pending_cleanup() is not None
+
+    transaction = MigrationTransaction(
+        1,
+        uuid4().hex,
+        source,
+        target,
+        "2026-10-02T00:00:00Z",
+        None,
+    )
+    store.write_migration_transaction(transaction)
+    original_factory = dependencies.data_location_factory
+
+    def controller_factory(location_store, **kwargs):
+        controller = original_factory(location_store, **kwargs)
+
+        def fail_reconciliation():
+            raise DataMigrationError("cleanup_failed")
+
+        controller._migration.reconcile_interrupted_migration = fail_reconciliation
+        return controller
+
+    dependencies = replace(
+        dependencies,
+        data_location_factory=controller_factory,
+        startup_interaction_factory=lambda: SimpleNamespace(
+            ask_migration_failure=lambda info: "retry",
+            ask_retry_locate_exit=lambda code: "exit",
+            choose_data_parent=lambda: None,
+        ),
+    )
+
+    assert (
+        DesktopApplication(local_app_data=tmp_path, dependencies=dependencies).run()
+        == 1
+    )
+    assert store.read_current() == target
+    assert store.read_migration_transaction() == transaction
+    assert store.read_pending_cleanup() is not None
+    names = event_names(events)
+    assert not set(names) & {
+        "log",
+        "database",
+        "key",
+        "key_store",
+        "server",
+        "server_start",
+        "webview",
+        "webview_loader",
+        "window",
+        "gui",
+        "bridge",
+    }
+    errors = [e[1] for e in events if isinstance(e, tuple) and e[0] == "error"]
+    assert len(errors) == 1
+    assert errors[0]
+    assert "cleanup_failed" not in errors[0]
+    assert str(source.root) not in errors[0]
+    assert transaction.operation_id not in errors[0]
+    assert "private cleanup exception" not in repr(events)
+
+
 def test_real_controller_cancel_after_reconciliation_failure_keeps_journal(tmp_path):
     from dataclasses import replace
     from uuid import uuid4

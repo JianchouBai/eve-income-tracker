@@ -490,6 +490,7 @@ class DesktopApplication:
                     status = controller.status()
                     if (
                         status.pending_cleanup is not None
+                        and not status.migration_recovery_pending
                         and status.current_path == info.target
                         and status.current_path != status.pending_cleanup.reference.root
                     ):
