@@ -13,11 +13,12 @@ function beijingDate(offset = 0) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(date);
 }
 
-function isk(value) {
-  const [whole, fraction] = String(value).split('.');
+function isk(value, fractionDigits = 2) {
+  const [whole, rawFraction = ''] = String(value).split('.');
   const sign = whole.startsWith('-') ? '-' : '';
   const digits = whole.replace('-', '');
-  return `${sign}${digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${fraction ? `.${fraction}` : ''} ISK`;
+  const fraction = rawFraction.padEnd(fractionDigits, '0').slice(0, fractionDigits);
+  return `${sign}${digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${fractionDigits ? `.${fraction}` : ''} ISK`;
 }
 
 function cell(value) {
@@ -247,9 +248,9 @@ function draw(days) {
 
 function render(data, entries) {
   report = data;
-  $('summary-income').textContent = isk(data.income);
-  $('summary-tax').textContent = isk(data.tax);
-  $('summary-net').textContent = isk(data.net);
+  $('summary-income').textContent = isk(data.income, 0);
+  $('summary-tax').textContent = isk(data.tax, 0);
+  $('summary-net').textContent = isk(data.net, 0);
   rows($('daily-table').tBodies[0], data.daily, [
     { key: 'date' }, { key: 'income', money: true }, { key: 'tax', money: true }, { key: 'net', money: true },
   ]);

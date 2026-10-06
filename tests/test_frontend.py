@@ -129,6 +129,81 @@ def test_dashboard_script_contract_covers_enable_sync_status_decimal_details_and
     assert "innerHTML" not in script
 
 
+def test_dashboard_money_display_truncates_summaries_and_keeps_two_detail_decimals():
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js required for executable frontend contract")
+    script = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+class Element {
+  constructor(id = '') {
+    this.id = id;
+    this.children = [];
+    this.textContent = '';
+    this.tBodies = [this];
+    this.classList = { add() {}, remove() {} };
+  }
+  replaceChildren(...children) { this.children = children; }
+  append(...children) { this.children.push(...children); }
+  querySelector() { return this; }
+  getContext() { return null; }
+  setAttribute(name, value) { this[name] = value; }
+}
+const nodes = new Map();
+const element = id => {
+  if (!nodes.has(id)) nodes.set(id, new Element(id));
+  return nodes.get(id);
+};
+global.document = {
+  getElementById: element,
+  querySelector: () => ({content: 'csrf-known'}),
+  querySelectorAll: () => [],
+  createElement: () => new Element(),
+  addEventListener() {},
+  body: {dataset: {}},
+};
+global.addEventListener = () => {};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+
+render({
+  income: '53876333.2131',
+  tax: '3911829.99',
+  net: '49964503.2231',
+  daily: [{date: '2026-10-06', income: '10.1', tax: '2.299', net: '7.801'}],
+  categories: [{category: 'bounty', net: '25'}],
+  characters: [{name: 'pilot', net: '-0.019'}],
+}, {entries: [{date: '2026-10-06', character_name: 'pilot', category: 'tax',
+  amount: '-3911829.999', description: 'tax'}]});
+
+assert.equal(element('summary-income').textContent, '53,876,333 ISK');
+assert.equal(element('summary-tax').textContent, '3,911,829 ISK');
+assert.equal(element('summary-net').textContent, '49,964,503 ISK');
+assert.deepEqual(
+  element('daily-table').children[0].children.map(child => child.textContent),
+  ['2026-10-06', '10.10 ISK', '2.29 ISK', '7.80 ISK'],
+);
+assert.equal(element('category-breakdown').children[2].textContent, 'bounty：25.00 ISK');
+assert.equal(element('character-breakdown').children[2].textContent, 'pilot：-0.01 ISK');
+assert.equal(element('entry-details').children[0].children[3].textContent, '-3,911,829.99 ISK');
+"""
+    result = subprocess.run(
+        [node, "-e", script, str(Path(__file__).parents[1] / "app/static/app.js")],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_group_workspace_has_accessible_plain_language_controls(tmp_path):
     with client(tmp_path) as browser:
         page = browser.get("/").text
@@ -315,7 +390,7 @@ def test_storage_dialog_is_desktop_only_and_versions_are_dynamic(tmp_path, monke
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
         release_page = browser.get("/").text
     assert "<span class='system-state'>V1.0</span>" in release_page
-    assert "<p class='storage-version'>关于 EVE 每日收益 · V1.0.1</p>" in release_page
+    assert "<p class='storage-version'>关于 EVE 每日收益 · V1.0.2</p>" in release_page
 
     monkeypatch.setattr(web, "APP_VERSION", "8.7.6", raising=False)
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
