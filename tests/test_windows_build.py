@@ -356,6 +356,9 @@ def test_build_pipeline_has_fail_fast_release_gates_and_scoped_cleanup():
     assert '"build\\windows"' in script
     assert '"dist\\windows"' in script
     assert '"installer-output"' in script
+    clean_targets = script.rsplit("$cleanTargets = @(", 1)[1].split(")", 1)[0]
+    assert "$installerOutputPath" not in clean_targets
+    assert "[System.IO.Directory]::CreateDirectory($installerOutputPath)" in script
     assert "Remove-OwnedDirectory" in script
     assert "Remove-Item -LiteralPath" in script
     assert "Resolve-CanonicalPath" in script

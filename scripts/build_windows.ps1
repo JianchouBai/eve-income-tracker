@@ -283,8 +283,7 @@ $distWindowsPath = Join-Path $projectRoot "dist\windows"
 $installerOutputPath = Join-Path $projectRoot "installer-output"
 $cleanTargets = @(
     $buildWindowsPath,
-    $distWindowsPath,
-    $installerOutputPath
+    $distWindowsPath
 )
 foreach ($target in $cleanTargets) {
     Remove-OwnedDirectory $target $cleanTargets
@@ -292,6 +291,7 @@ foreach ($target in $cleanTargets) {
 foreach ($target in $cleanTargets) {
     [System.IO.Directory]::CreateDirectory($target) | Out-Null
 }
+[System.IO.Directory]::CreateDirectory($installerOutputPath) | Out-Null
 
 $generatedPath = Join-Path $buildWindowsPath "generated"
 $iconPath = Join-Path $generatedPath "app-icon.ico"
