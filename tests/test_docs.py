@@ -317,6 +317,7 @@ def test_readme_documents_selected_storage_and_recovery_contract():
 
 def test_changelog_records_completed_release_without_erasing_history():
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## 1.0.1（2026-10-06）" in changelog
     assert "## 1.0.0（2026-10-01）" in changelog
     assert "未发布（计划 v1.0.0）" not in changelog
     assert "## 0.1.0（2026-09-30）" in changelog

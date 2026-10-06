@@ -110,9 +110,14 @@ def build_dashboard(
             continue
         day = entry.date_utc.astimezone(BEIJING).date()
         if classified.kind == "income":
-            daily_totals[day][0] += classified.amount
-            category_totals[classified.category][0] += classified.amount
-            character_totals[entry.character_id][0] += classified.amount
+            tax = entry.tax if entry.tax is not None and entry.tax > ZERO else ZERO
+            gross = classified.amount + tax
+            daily_totals[day][0] += gross
+            daily_totals[day][1] += tax
+            category_totals[classified.category][0] += gross
+            category_totals[classified.category][1] += tax
+            character_totals[entry.character_id][0] += gross
+            character_totals[entry.character_id][1] += tax
         else:
             daily_totals[day][1] += classified.amount
             category_totals[classified.category][1] += classified.amount

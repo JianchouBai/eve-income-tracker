@@ -6,7 +6,7 @@
 
 ### 安装与启动
 
-从项目的 GitHub Releases 下载版本化的 `EVE-Income-Tracker-1.0.0-x64-Setup.exe`。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
+从项目的 GitHub Releases 下载版本化的 `EVE-Income-Tracker-1.0.1-x64-Setup.exe`。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
 
 安装包按当前 Windows 用户安装，不要求管理员权限，并创建开始菜单和桌面快捷方式。安装完成后直接双击 **EVE Income Tracker**：无需安装 Python，也无需打开终端。程序自带应用代码和页面资源；若电脑缺少 Microsoft Edge WebView2 Runtime，安装程序会调用微软官方引导程序安装它。
 
@@ -165,7 +165,7 @@ notepad .env
 {
   "eve_client_id": "你的公开 Client ID",
   "eve_callback_url": "http://localhost:8000/auth/callback",
-  "eve_user_agent": "eve-income-tracker/1.0.0 (your-valid-email@example.com)",
+  "eve_user_agent": "eve-income-tracker/1.0.1 (your-valid-email@example.com)",
   "esi_compatibility_date": "2026-05-19"
 }
 ```
@@ -179,4 +179,4 @@ py -3.12 -m pip install -r requirements-build.txt
 
 功能分支默认以与 `origin/main` 的共同祖先作为发布基线。如果当前 `HEAD` 已等于 `origin/main`，或需要指定其他发布范围，必须显式传入上一个版本标签或提交，例如 `.\scripts\build_windows.ps1 -ReleaseBase v0.1.0`；基线必须是当前 `HEAD` 的祖先且不能等于 `HEAD`。
 
-构建脚本会验证公开配置与微软签名，运行全量测试、Ruff 和 Git 差异检查，生成资源并执行 PyInstaller 冻结烟雾检查，最后用 Inno Setup 7 生成 `installer-output\EVE-Income-Tracker-<版本>-x64-Setup.exe` 并打印绝对路径和 SHA-256。`release-config.local.json`、WebView2 引导程序、`build`、`dist` 与 `installer-output` 均留在本机，不上传远端仓库。
+构建脚本会验证公开配置与微软签名，运行全量测试、Ruff 和 Git 差异检查，生成资源并执行 PyInstaller 冻结烟雾检查，最后用 Inno Setup 7 生成 `installer-output\EVE-Income-Tracker-<版本>-x64-Setup.exe` 并打印绝对路径和 SHA-256。`release-config.local.json`、WebView2 引导程序、`build` 与 `dist` 留在本机；`installer-output` 中的版本化安装包纳入 Git，供下载与追溯。

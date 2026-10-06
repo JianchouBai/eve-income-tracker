@@ -21,8 +21,6 @@ release-config.local.json
 vendor/MicrosoftEdgeWebview2Setup.exe
 build/
 dist/
-installer-output/*
-!installer-output/EVE-Income-Tracker-1.0.0-x64-Setup.exe
 *.key
 *.log
 backups/

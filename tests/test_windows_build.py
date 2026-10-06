@@ -387,14 +387,20 @@ def test_build_pipeline_quotes_external_arguments_and_checks_exact_artifacts():
     assert "Test-Path -LiteralPath" in script
 
 
-def test_generated_and_release_outputs_are_ignored_and_scoped():
+def test_generated_outputs_are_ignored_but_installers_are_visible():
     ignored = read(ROOT / ".gitignore").splitlines()
 
     assert "release-config.local.json" in ignored
     assert "vendor/MicrosoftEdgeWebview2Setup.exe" in ignored
     assert "build/" in ignored
     assert "dist/" in ignored
-    assert "installer-output/" in ignored
+    installer = "installer-output/EVE-Income-Tracker-9.9.9-x64-Setup.exe"
+    visibility = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--quiet", installer],
+        cwd=ROOT,
+        check=False,
+    )
+    assert visibility.returncode == 1
     for pattern in [
         "*.sqlite",
         "*.sqlite-*",

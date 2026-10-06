@@ -241,15 +241,13 @@ def test_dashboard_combines_external_donations_but_keeps_category_separate():
     ) == (Decimal(25), Decimal(0), Decimal(25))
 
 
-def test_tax_metadata_is_not_added_to_tax_totals():
+def test_income_tax_metadata_is_split_into_gross_tax_and_net():
     report = build_dashboard(
         [
-            journal(ref_type="bounty_prizes", amount="100.00", tax="20.00"),
             journal(
-                journal_id=2,
-                ref_type="bounty_prize_corporation_tax",
-                amount="-10.00",
-                tax="20.00",
+                ref_type="bounty_prizes",
+                amount="47949936.56",
+                tax="5926396.6531",
             ),
         ],
         [enabled_character(1)],
@@ -258,8 +256,9 @@ def test_tax_metadata_is_not_added_to_tax_totals():
         group_member_ids={1},
     )
 
-    assert report.tax == Decimal("10.00")
-    assert report.net == Decimal("90.00")
+    assert report.income == Decimal("53876333.2131")
+    assert report.tax == Decimal("5926396.6531")
+    assert report.net == Decimal("47949936.56")
 
 
 def test_utc_1600_belongs_to_next_beijing_day():
