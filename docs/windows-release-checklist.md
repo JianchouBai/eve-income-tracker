@@ -47,5 +47,6 @@
 ## 发布
 
 - [ ] 使用已验收的提交和原始安装包手动创建 GitHub Release，不重新打包。
+- [ ] `installer-output` 只保留 `.exe` 安装包；另存的 `.exe.sha256` 校验文件放在 `release-checksums`，作为 Release 附件时从该目录上传。
 - [ ] 发布说明包含版本、主要变化、安装包文件名、SHA-256、Windows x64/WebView2 要求，以及未签名安装包可能显示“未知发布者”的说明。
 - [ ] 下载一次发布页中的安装包并重新核对 SHA-256。

@@ -135,18 +135,18 @@
           </details>
           </div>
         </div>
-        <aside id='monitor' class='command-rail' aria-labelledby='monitor-title'>
+        <aside id='monitor' class='command-rail' aria-labelledby='monitor-title' data-collapsed='true'>
           <div id='monitor-heading' class='rail-heading'>
-            <div id='monitor-heading-copy' class='rail-heading-copy'><span class='section-index'>监控台</span><h2 id='monitor-title'>角色与账本管理</h2><p>管理角色组与成员，选择账本月份，随时同步钱包。</p></div>
-            <p id='monitor-summary' class='monitor-summary' aria-live='polite' hidden><strong id='monitor-group-name'>正在加载角色组…</strong><span id='monitor-character-count'>0 名角色</span></p>
+            <div id='monitor-heading-copy' class='rail-heading-copy' hidden><span class='section-index'>监控台</span><h2 id='monitor-title'>角色与账本管理</h2><p>管理角色组与成员，选择账本月份，随时同步钱包。</p></div>
+            <p id='monitor-summary' class='monitor-summary' aria-live='polite'><strong id='monitor-group-name'>正在加载角色组…</strong><span id='monitor-character-count'>0 名角色</span></p>
             <div class='rail-heading-actions'>
-              <a id='monitor-return' class='monitor-jump' href='#dashboard'>返回收益概览 <span aria-hidden='true'>↑</span></a>
-              <button id='monitor-toggle' class='monitor-toggle' type='button' aria-expanded='true' aria-controls='monitor-content'><span id='monitor-toggle-label'>收起监控台</span><svg viewBox='0 0 24 24' aria-hidden='true'><path d='m6 14 6-6 6 6'/></svg></button>
+              <a id='monitor-return' class='monitor-jump' href='#dashboard' hidden>返回收益概览 <span aria-hidden='true'>↑</span></a>
+              <button id='monitor-toggle' class='monitor-toggle' type='button' aria-expanded='false' aria-controls='monitor-content'><span id='monitor-toggle-label'>展开监控台</span><svg viewBox='0 0 24 24' aria-hidden='true'><path d='m6 14 6-6 6 6'/></svg></button>
             </div>
           </div>
 
           <form id='role-filters' class='filters'>
-            <div id='monitor-content' class='monitor-content'>
+            <div id='monitor-content' class='monitor-content' inert aria-hidden='true'>
               <div class='monitor-controls'>
                 <div class='filter-fields'>
                   <fieldset class='group-scope'>

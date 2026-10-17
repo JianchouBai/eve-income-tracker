@@ -93,7 +93,7 @@ def test_dashboard_exposes_financial_hierarchy_and_bottom_monitor(tmp_path):
         page = browser.get("/").text
 
     assert "id='page-title'" in page
-    assert "<aside id='monitor' class='command-rail' aria-labelledby='monitor-title'>" in page
+    assert re.search(r"<aside\b[^>]*\bid='monitor'[^>]*>", page)
     assert "<section class='summary-ledger' aria-label='收益汇总'>" in page
     assert page.index("id='entry-details'") < page.index("id='monitor'")
     assert "aria-expanded='false' aria-controls='daily-table'" in page
@@ -355,8 +355,8 @@ def test_storage_dialog_is_desktop_only_and_versions_are_dynamic(tmp_path, monke
     )
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
         release_page = browser.get("/").text
-    assert "<span class='system-state'>V2.0.4</span>" in release_page
-    assert "<p class='storage-version'>关于 EVE 每日收益 · V2.0.4</p>" in release_page
+    assert "<span class='system-state'>V2.0.5</span>" in release_page
+    assert "<p class='storage-version'>关于 EVE 每日收益 · V2.0.5</p>" in release_page
 
     monkeypatch.setattr(web, "APP_VERSION", "8.7.6", raising=False)
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:

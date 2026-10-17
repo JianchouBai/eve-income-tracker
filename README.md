@@ -6,7 +6,7 @@
 
 ### 安装与启动
 
-从项目的 GitHub Releases 下载对应版本的 `EVE-Income-Tracker-<版本>-x64-Setup.exe`，当前应用版本为 **2.0.4**。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
+从项目的 GitHub Releases 下载对应版本的 `EVE-Income-Tracker-<版本>-x64-Setup.exe`，当前应用版本为 **2.0.5**。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
 
 安装包按当前 Windows 用户安装，不要求管理员权限，并创建开始菜单和桌面快捷方式。安装完成后直接双击 **EVE Income Tracker**：无需安装 Python，也无需打开终端。程序自带应用代码和页面资源；若电脑缺少 Microsoft Edge WebView2 Runtime，安装程序会调用微软官方引导程序安装它。
 
@@ -37,7 +37,7 @@ EVE 应用只申请只读钱包权限 `esi-wallet.read_character_wallet.v1`。�
 └─ backups\
 ```
 
-其中 `config\local.key` 是由 Windows DPAPI 保护的本机密钥，只供当前 Windows 用户读取。数据库、DPAPI 密钥、日志、备份、维护者的 `release-config.local.json` 和本地 `installer-output` 安装包均被仓库忽略，不会进入 Git，也不会随源码推送到远端仓库。
+其中 `config\local.key` 是由 Windows DPAPI 保护的本机密钥，只供当前 Windows 用户读取。数据库、DPAPI 密钥、日志、备份和维护者的 `release-config.local.json` 均被仓库忽略，不会进入 Git，也不会随源码推送到远端仓库。公开安装包保存在 `installer-output`，校验文件保存在 `release-checksums`，两者纳入 Git，供下载与追溯。
 
 首次启动且尚无桌面数据库时，应用会询问是否导入旧版 v2 命令行数据库。选择导入只会把源数据库复制到所选数据目录并在副本上迁移，源数据库不会被修改或删除；角色、角色组、钱包历史和原统计起点会保留。旧刷新令牌不会被搬入新的安全边界，因此导入后的每个角色都必须重新授权。选择“不导入”则为这台电脑创建空白的独立数据库。
 
@@ -68,6 +68,8 @@ EVE 应用只申请只读钱包权限 `esi-wallet.read_character_wallet.v1`。�
 应定期手动同步，因为 ESI 的可回溯历史有限。日期按北京时间 `Asia/Shanghai` 的自然日分组，UTC 16:00 属于次日北京时间 00:00。顶部收益默认显示当日；点击日期区域按日、周、月循环，周为含当天的最近七个自然日，月为自然月，左右箭头翻阅相邻历史周期。收入、税费、税后收入、类型分项、角色分项和已纳入流水随顶部周期更新。
 
 逐日账本独立于顶部周期，默认选择当前月，可通过页面底部监控台切换月份。默认收纳时，当前月显示本月截至今天最近三天的明细，月初不足三天按实际天数显示；历史月份显示该月最后三天。展开后显示所选整月，无活动日期补零。底层报表接口单次查询最多 366 天。收益汇总、来源类型、角色分项和逐日账本中的 LP 收入目前只提供界面占位，以 `—` 表示尚未接入数据。
+
+监控台首次打开时默认折叠，显示当前角色组名称与组内角色总数。点击“展开监控台”可平滑展开角色管理和账本月份；同步钱包流水按钮与同步记录始终可见。
 
 - 到账收入是纳入白名单的正向钱包变动，不反推名义税前收益。
 - 已交税费是对应负向税务流水的绝对值，不重复累加附加 `tax` 字段。
@@ -167,7 +169,7 @@ notepad .env
 {
   "eve_client_id": "你的公开 Client ID",
   "eve_callback_url": "http://localhost:8000/auth/callback",
-  "eve_user_agent": "eve-income-tracker/2.0.4 (your-valid-email@example.com)",
+  "eve_user_agent": "eve-income-tracker/2.0.5 (your-valid-email@example.com)",
   "esi_compatibility_date": "2026-05-19"
 }
 ```
@@ -181,4 +183,4 @@ py -3.12 -m pip install -r requirements-build.txt
 
 功能分支默认以与 `origin/main` 的共同祖先作为发布基线。如果当前 `HEAD` 已等于 `origin/main`，或需要指定其他发布范围，必须显式传入上一个版本标签或提交，例如 `.\scripts\build_windows.ps1 -ReleaseBase v0.1.0`；基线必须是当前 `HEAD` 的祖先且不能等于 `HEAD`。
 
-构建脚本会验证公开配置与微软签名，运行全量测试、Ruff 和 Git 差异检查，生成资源并执行 PyInstaller 冻结烟雾检查，最后用 Inno Setup 7 生成 `installer-output\EVE-Income-Tracker-<版本>-x64-Setup.exe` 并打印绝对路径和 SHA-256。`release-config.local.json`、WebView2 引导程序、`build` 与 `dist` 留在本机；`installer-output` 中的版本化安装包纳入 Git，供下载与追溯。
+构建脚本会验证公开配置与微软签名，运行全量测试、Ruff 和 Git 差异检查，生成资源并执行 PyInstaller 冻结烟雾检查，最后用 Inno Setup 7 生成 `installer-output\EVE-Income-Tracker-<版本>-x64-Setup.exe` 并打印绝对路径和 SHA-256。`release-config.local.json`、WebView2 引导程序、`build` 与 `dist` 留在本机。`installer-output` 只放各版本的 `.exe` 安装包；发布时另存的 `.exe.sha256` 校验文件统一放在 `release-checksums`，保持安装包目录整洁。
