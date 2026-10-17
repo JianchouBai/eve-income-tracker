@@ -227,12 +227,14 @@ tbody tr:last-child td { border-bottom: 0; }
 .ungrouped-row small { padding-left: 0; }
 .ungrouped-row .membership-action { grid-column: 2 / 4; }
 .month-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
-.filter-actions { display: flex; grid-column: 1 / -1; gap: 10px; justify-content: flex-end; padding: 18px 24px 12px; border-top: 1px solid var(--rule); }
 .management-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: flex-end; padding: 18px 24px; border-top: 1px solid var(--rule); }
 .management-actions .rail-link { margin: 0 auto 0 0; }
 .rail-link { grid-column: 1 / -1; justify-self: end; margin: 0 24px 20px; font-size: var(--text-xs); }
-.sync-panel { margin: 0 24px 24px; padding: 18px 20px; border: 1px solid #dae6e9; border-radius: 14px; background: var(--blue); }
-.sync-panel h2 { margin-bottom: 8px; color: #426e7c; font-family: var(--font-body); font-size: var(--text-sm); font-weight: 550; }
+.sync-panel { margin: 18px 24px 24px; padding: 18px 20px; border: 1px solid #dae6e9; border-radius: 14px; background: var(--blue); }
+.sync-heading { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.sync-panel h2 { margin: 0; color: #426e7c; font-family: var(--font-body); font-size: var(--text-sm); font-weight: 550; }
+.sync-action { min-height: 36px; padding: 0.45rem 0.75rem; border-color: #b8d1c1; background: var(--surface-solid); color: var(--ice); font-size: var(--text-xs); box-shadow: none; }
+.sync-action:hover:not(:disabled) { border-color: #9fbeaa; background: #eaf4ec; }
 .sync-panel p, .sync-panel ul { margin: 0; padding: 0; color: var(--muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .sync-panel ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; list-style: none; }
 :focus-visible { outline: 2px solid #44856a; outline-offset: 4px; }
@@ -322,11 +324,9 @@ tbody tr:last-child td { border-bottom: 0; }
   .filter-fields { grid-template-columns: minmax(0, 1fr); }
   .filters fieldset { padding: 20px 18px; }
   .filters fieldset + fieldset { border-left: 0; border-top: 1px solid var(--rule); }
-  .filter-actions { justify-content: stretch; padding: 18px; }
   .management-actions { padding: 18px; }
-  .filter-actions button { flex: 1; }
   .rail-link { margin-right: 18px; }
-  .sync-panel { margin: 0 18px 18px; padding: 16px; }
+  .sync-panel { margin: 18px; padding: 16px; }
   .sync-panel ul { grid-template-columns: 1fr; }
 }
 

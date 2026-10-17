@@ -200,14 +200,16 @@
                 </div>
               </div>
             </div>
-            <div class='filter-actions'>
-              <button id='sync-button' class='button button-primary' type='button'>同步钱包流水</button>
-            </div>
           </form>
 
-          <section id='sync-results' class='sync-panel' aria-live='polite'>
-            <h2>同步记录</h2>
-            <p>尚未同步。</p>
+          <section id='wallet-sync' class='sync-panel' aria-labelledby='sync-title'>
+            <div class='sync-heading'>
+              <h2 id='sync-title'>同步记录</h2>
+              <button id='sync-button' class='button sync-action' type='button'>同步钱包流水</button>
+            </div>
+            <div id='sync-results' aria-live='polite'>
+              <p>尚未同步。</p>
+            </div>
           </section>
         </aside>
       </div>

@@ -751,9 +751,6 @@ async function assignCharacterGroup(characterId, groupId, button) {
 function renderSyncResults(results) {
   const region = $('sync-results');
   region.replaceChildren();
-  const title = document.createElement('h2');
-  title.textContent = '同步状态';
-  region.append(title);
   if (!results.length) {
     const empty = document.createElement('p');
     empty.textContent = '没有可同步的已启用角色。';
