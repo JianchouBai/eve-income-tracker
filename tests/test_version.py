@@ -12,7 +12,7 @@ def test_package_and_project_metadata_use_one_version_source():
     version = app.__version__
 
     assert version == version_module.APP_VERSION
-    assert version == "1.0.2"
+    assert version == "2.0.0"
     assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
 
     project = tomllib.loads(
@@ -31,5 +31,5 @@ def test_desktop_smoke_user_agent_uses_release_version():
     from app.desktop import _smoke_release_config
 
     assert _smoke_release_config().eve_user_agent == (
-        "eve-income-tracker/1.0.2 (smoke@example.com)"
+        "eve-income-tracker/2.0.0 (smoke@example.com)"
     )

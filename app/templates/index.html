@@ -23,7 +23,7 @@
         </div>
       </div>
       <div class='masthead-action'>
-        <span class='system-state'>V{{ short_version }}</span>
+        <span class='system-state'>V{{ app_version }}</span>
         {% if runtime_mode == "desktop" %}
         <button id='settings-button' type='button' aria-haspopup='dialog' aria-controls='data-settings-dialog'>设置</button>
         {% endif %}
@@ -55,11 +55,90 @@
 
     <section id='dashboard' {% if not authenticated %}hidden{% endif %}>
       <div class='dashboard-grid'>
-        <aside class='command-rail' aria-label='角色组、角色与日期控制'>
+
+
+        <div class='report-column'>
+          <p id='status-message' class='notice status-bar' role='status'>正在加载报表…</p>
+          <div id='report-deck' class='report-deck'>
+
+          <div class='report-toolbar'>
+            <div class='period-switcher' role='group' aria-label='收益展示周期'>
+              <button id='period-prev' class='period-arrow' type='button' aria-label='上一日'>
+                <svg viewBox='0 0 24 24' aria-hidden='true'><path d='m14 6-6 6 6 6'/></svg>
+              </button>
+              <button id='period-mode' class='period-center' type='button' aria-label='当前按日显示，点击切换为按周显示'>
+                <svg viewBox='0 0 24 24' aria-hidden='true'><rect x='4' y='5' width='16' height='16' rx='3'/><path d='M4 10h16M8 3v4M16 3v4'/></svg>
+                <span><small id='period-kind'>按日显示</small><strong id='period-label'>今天</strong></span>
+                <span class='cycle-hint' aria-hidden='true'>↻</span>
+              </button>
+              <button id='period-next' class='period-arrow' type='button' aria-label='下一日'>
+                <svg viewBox='0 0 24 24' aria-hidden='true'><path d='m10 6 6 6-6 6'/></svg>
+              </button>
+            </div>
+            <div class='report-context'><p id='period-range' aria-live='polite' aria-atomic='true'></p><span>点击日期切换日 / 周 / 月</span></div>
+            <a class='monitor-jump' href='#monitor'>调整角色与账本月份 <span aria-hidden='true'>↓</span></a>
+          </div>
+
+          <div id='summary-content' class='summary-content'>
+          <section class='summary-ledger' aria-label='收益汇总'>
+            <article class='net-reading'>
+              <p>所选区间税后收入</p>
+              <strong id='summary-net'>—</strong>
+              <span>到账减去已交税费</span>
+            </article>
+            <div class='secondary-readings'>
+              <article>
+                <p>到账收入</p>
+                <strong id='summary-income'>—</strong>
+              </article>
+              <article class='tax-reading'>
+                <p>已交税费</p>
+                <strong id='summary-tax'>—</strong>
+              </article>
+            </div>
+            <article class='lp-reading'>
+              <p>所选区间 LP 收入</p>
+              <strong id='summary-lp'>— <small>LP</small></strong>
+              <span class='lp-note'>LP 收入暂未接入</span>
+            </article>
+          </section>
+
+
+          <section class='breakdowns' aria-label='收益分项'>
+            <section id='category-breakdown' class='panel breakdown-panel'><span class='section-index'>来源</span><h2>类型分项</h2><p>暂无数据</p></section>
+            <section id='character-breakdown' class='panel breakdown-panel'><span class='section-index'>舰长</span><h2>角色分项</h2><p>暂无数据</p></section>
+          </section>
+
+          </div>
+          <section id='monthly-ledger' class='panel table-panel' aria-labelledby='daily-title'>
+            <div class='panel-heading'>
+              <div><span class='section-index'>逐日账本</span><h2 id='daily-title'><span id='ledger-month-label'></span> · 每日明细</h2><p id='ledger-caption' class='ledger-caption'>最近 3 天明细 · 展开可查看整月</p></div>
+              <button id='ledger-toggle' class='button button-secondary' type='button' aria-expanded='false' aria-controls='daily-table'>展开整月</button>
+            </div>
+            <p id='ledger-status' class='ledger-status' role='status' aria-live='polite'></p>
+            <div class='scroll'>
+              <table id='daily-table'>
+                <thead><tr><th>北京时间日期</th><th>到账 ISK</th><th>税费 ISK</th><th>税后 ISK</th><th>LP 收入</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <details id='entry-details' class='panel entry-panel'>
+            <summary><span>已纳入流水明细</span><small>用于与游戏钱包逐条核对</small></summary>
+            <div class='scroll'>
+              <table>
+                <thead><tr><th>日期</th><th>角色</th><th>类型</th><th>金额</th><th>说明</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </details>
+          </div>
+        </div>
+        <aside id='monitor' class='command-rail' aria-labelledby='monitor-title'>
           <div class='rail-heading'>
-            <span class='section-index'>监控台</span>
-            <h2>报表范围</h2>
-            <p>先选择角色组，再确定组内角色和北京时间日期。</p>
+            <div><span class='section-index'>监控台</span><h2 id='monitor-title'>角色与账本管理</h2><p>管理角色组与成员，选择账本月份，随时同步钱包。</p></div>
+            <a class='monitor-jump' href='#dashboard'>返回收益概览 <span aria-hidden='true'>↑</span></a>
           </div>
 
           <form id='role-filters' class='filters'>
@@ -81,24 +160,31 @@
                   <button id='delete-group-button' type='button'>删除组</button>
                 </div>
               </div>
+
+            </fieldset>
+            <fieldset class='membership-scope'>
+              <legend>角色管理</legend>
               <section class='membership-rail' aria-labelledby='active-group-name'>
                 <div class='membership-heading'>
                   <span>当前角色组</span>
                   <h3 id='active-group-name'>尚未选择</h3>
                 </div>
                 <div id='enable-region' aria-live='polite'>正在加载角色…</div>
+                <p class='field-guidance'>勾选角色后点击“更新报表”，同时应用到顶部收益与月度账本。</p>
                 <div class='ungrouped-block'>
                   <h3>未分组角色</h3>
                   <div id='ungrouped-region' aria-live='polite'>正在加载角色…</div>
                 </div>
               </section>
             </fieldset>
-            <fieldset>
-              <legend>日期范围</legend>
-              <div class='date-grid'>
-                <label>开始日期<input id='date-from' type='date'></label>
-                <label>结束日期<input id='date-to' type='date'></label>
+            <fieldset class='ledger-scope'>
+              <legend>账本月份</legend>
+              <div class='month-picker'>
+                <label for='ledger-month'>选择月份</label>
+                <input id='ledger-month' type='month' min='2003-05' aria-describedby='ledger-guidance'>
+                <div class='month-actions'><button id='ledger-prev' type='button'>← 上个月</button><button id='ledger-next' type='button'>下个月 →</button></div>
               </div>
+              <p id='ledger-guidance' class='field-guidance'>仅切换逐日账本的月份；顶部收益可独立按日、周、月查看。</p>
             </fieldset>
             <div class='filter-actions'>
               <button id='report-button' class='button button-secondary' type='submit'>更新报表</button>
@@ -112,74 +198,6 @@
             <p>尚未同步。</p>
           </section>
         </aside>
-
-        <div class='report-column'>
-          <p id='status-message' class='notice status-bar' role='status'>正在加载报表…</p>
-          <div id='report-deck' class='report-deck'>
-
-          <section class='summary-ledger' aria-label='收益汇总'>
-            <article class='net-reading'>
-              <p>所选区间税后收入</p>
-              <strong id='summary-net'>—</strong>
-              <span>到账减去已交税费</span>
-            </article>
-            <div class='secondary-readings'>
-              <article>
-                <p>到账收入</p>
-                <strong id='summary-income'>—</strong>
-              </article>
-              <article class='tax-reading'>
-                <p>已交税费</p>
-                <strong id='summary-tax'>—</strong>
-              </article>
-            </div>
-          </section>
-
-          <section class='panel telemetry-panel' aria-labelledby='trend-title'>
-            <div class='panel-heading'>
-              <div>
-                <span class='section-index'>资金轨迹</span>
-                <h2 id='trend-title'>近 30 日趋势</h2>
-              </div>
-              <ul id='trend-legend' class='chart-legend' aria-label='图表图例'>
-                <li><i class='legend-income' aria-hidden='true'></i>到账收入</li>
-                <li><i class='legend-tax' aria-hidden='true'></i>已交税费</li>
-                <li><i class='legend-net' aria-hidden='true'></i>税后收入</li>
-              </ul>
-            </div>
-            <canvas id='trend-canvas' role='img' aria-label='收入、税费和税后收入趋势图' aria-describedby='trend-legend trend-fallback'>收入趋势图：图表不可用时请查看下方连续日表。</canvas>
-            <p id='trend-fallback' class='chart-fallback'>图表不可用时请查看下方连续日表。</p>
-          </section>
-
-          <section class='breakdowns' aria-label='收益分项'>
-            <section id='category-breakdown' class='panel breakdown-panel'><span class='section-index'>来源</span><h2>类型分项</h2><p>暂无数据</p></section>
-            <section id='character-breakdown' class='panel breakdown-panel'><span class='section-index'>舰长</span><h2>角色分项</h2><p>暂无数据</p></section>
-          </section>
-
-          <section class='panel table-panel' aria-labelledby='daily-title'>
-            <div class='panel-heading'>
-              <div><span class='section-index'>逐日账本</span><h2 id='daily-title'>每日明细</h2></div>
-              <p>全部日期按北京时间归档</p>
-            </div>
-            <div class='scroll'>
-              <table id='daily-table'>
-                <thead><tr><th>北京时间日期</th><th>到账</th><th>税费</th><th>税后</th></tr></thead>
-                <tbody></tbody>
-              </table>
-            </div>
-          </section>
-
-          <details id='entry-details' class='panel entry-panel'>
-            <summary><span>已纳入流水明细</span><small>用于与游戏钱包逐条核对</small></summary>
-            <div class='scroll'>
-              <table>
-                <thead><tr><th>日期</th><th>角色</th><th>类型</th><th>金额</th><th>说明</th></tr></thead>
-                <tbody></tbody>
-              </table>
-            </div>
-          </details>
-          </div>
-        </div>
       </div>
     </section>
   </main>

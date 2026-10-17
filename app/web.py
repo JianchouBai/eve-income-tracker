@@ -341,7 +341,6 @@ def create_app(
                 "csrf_token": request.session.get("csrf_token", ""),
                 "runtime_mode": runtime.mode,
                 "app_version": APP_VERSION,
-                "short_version": ".".join(APP_VERSION.split(".")[:2]),
             },
         )
 

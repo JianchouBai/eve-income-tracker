@@ -61,8 +61,11 @@ def test_dashboard_shell_contains_semantic_regions_and_local_assets(tmp_path):
         "rename-group-button",
         "delete-group-button",
         "active-group-name",
-        "date-from",
-        "date-to",
+        "ledger-month",
+        "ledger-toggle",
+        "period-mode",
+        "period-prev",
+        "period-next",
         "sync-button",
         "add-role-link",
         "reauthorize-link",
@@ -71,32 +74,32 @@ def test_dashboard_shell_contains_semantic_regions_and_local_assets(tmp_path):
         "summary-income",
         "summary-tax",
         "summary-net",
-        "trend-canvas",
+        "summary-lp",
         "category-breakdown",
         "character-breakdown",
         "daily-table",
         "entry-details",
     ]:
         assert token in page.text
-    assert "canvas" in page.text and "收入趋势图" in page.text
+    assert "收益展示周期" in page.text
     assert css.headers["content-type"].startswith("text/css")
     assert js.headers["content-type"].startswith("text/javascript")
     assert "https://" not in page.text
     assert "http://" not in page.text
 
 
-def test_dashboard_exposes_financial_hierarchy_and_chart_legend(tmp_path):
+def test_dashboard_exposes_financial_hierarchy_and_bottom_monitor(tmp_path):
     with client(tmp_path) as browser:
         page = browser.get("/").text
 
     assert "id='page-title'" in page
-    assert "<aside class='command-rail' aria-label='角色组、角色与日期控制'>" in page
+    assert "<aside id='monitor' class='command-rail' aria-labelledby='monitor-title'>" in page
     assert "<section class='summary-ledger' aria-label='收益汇总'>" in page
-    assert "aria-describedby='trend-legend trend-fallback'" in page
-    assert "id='trend-legend'" in page
+    assert page.index("id='entry-details'") < page.index("id='monitor'")
+    assert "aria-expanded='false' aria-controls='daily-table'" in page
 
 
-def test_dashboard_script_contract_covers_enable_sync_status_decimal_details_and_canvas_fallback(
+def test_dashboard_script_contract_covers_enable_sync_status_and_decimal_details(
     tmp_path,
 ):
     with client(tmp_path) as browser:
@@ -111,17 +114,12 @@ def test_dashboard_script_contract_covers_enable_sync_status_decimal_details_and
         "sync-results",
         "last_synced_at",
         "isk(x.amount)",
-        "getContext('2d')",
-        "if (!ctx)",
-        "BigInt",
-        "drawSeries",
         "roles().then(load).catch",
         "data.income",
         "name",
         "data-report-select",
         "result.error.message",
         "button.disabled = true",
-        "trend-fallback",
     ]:
         assert token in script
     assert "sync-results" in page
@@ -186,12 +184,16 @@ render({
 assert.equal(element('summary-income').textContent, '53,876,333 ISK');
 assert.equal(element('summary-tax').textContent, '3,911,829 ISK');
 assert.equal(element('summary-net').textContent, '49,964,503 ISK');
+vm.runInThisContext("ledgerMonth = '2026-10'; ledgerExpanded = true; ledgerDays = [{date: '2026-10-06', income: '10.1', tax: '2.299', net: '7.801'}];");
+renderLedger();
 assert.deepEqual(
   element('daily-table').children[0].children.map(child => child.textContent),
-  ['2026-10-06', '10.10 ISK', '2.29 ISK', '7.80 ISK'],
+  ['2026-10-06', '10.10 ISK', '2.29 ISK', '7.80 ISK', '—'],
 );
-assert.equal(element('category-breakdown').children[2].textContent, 'bounty：25.00 ISK');
-assert.equal(element('character-breakdown').children[2].textContent, 'pilot：-0.01 ISK');
+assert.equal(element('category-breakdown').children[2].children[1].textContent, '25.00 ISK');
+assert.equal(element('category-breakdown').children[3].children[1].textContent, '— LP');
+assert.equal(element('character-breakdown').children[2].children[1].textContent, '-0.01 ISK');
+assert.equal(element('character-breakdown').children[2].children[2].textContent, 'LP 收入 —');
 assert.equal(element('entry-details').children[0].children[3].textContent, '-3,911,829.99 ISK');
 """
     result = subprocess.run(
@@ -275,8 +277,8 @@ def test_report_load_rejects_out_of_order_group_responses(tmp_path):
     with client(tmp_path) as browser:
         script = browser.get("/static/app.js").text
 
-    load = script.split("async function load() {", 1)[1].split(
-        "function roleStatus", 1
+    load = script.split("async function loadSummary() {", 1)[1].split(
+        "async function loadLedger", 1
     )[0]
     assert "let reportRequestGeneration = 0;" in script
     assert "const generation = ++reportRequestGeneration;" in load
@@ -284,52 +286,16 @@ def test_report_load_rejects_out_of_order_group_responses(tmp_path):
     assert "generation !== reportRequestGeneration" in load
     assert "requestedGroupId !== selectedGroupId" in load
     assert "$('report-deck').hidden = true;" in load
-    assert "$('report-deck').hidden = false;" in load
+    assert "$('summary-content').hidden = false;" in load
     assert "正在加载当前角色组报表" in load
 
 
-def test_dashboard_chart_contract_uses_one_exact_scale_for_all_money_series(tmp_path):
-    with client(tmp_path) as browser:
-        script = browser.get("/static/app.js").text
-
-    # The served asset must pool all three monetary series before finding its
-    # exact maximum; otherwise income=100, tax=10, net=90 each peak at 1.
-    scale = script.split("function chartScale(days) {", 1)[1].split(
-        "function normalizedRatios", 1
-    )[0]
-    assert "days.flatMap" in scale
-    assert "['income', 'tax', 'net'].map((key) => decimalPart(day[key]))" in scale
-    assert "part.value * (10n ** (scale - part.scale))" in scale
-    assert "const absolute = value < 0n ? -value : value;" in scale
-    assert "absolute > largest ? absolute : largest" in scale
-    assert "return { scale, maximum };" in scale
-
-    normalize = script.split("function normalizedRatios", 1)[1].split(
-        "function drawSeries", 1
-    )[0]
-    assert "chart.scale - part.scale" in normalize
-    assert "const maximum = chart.maximum;" in normalize
-    assert "reduce(" not in normalize
-    assert "if (maximum === 0n) return values.map(() => 0);" in normalize
-    assert "const chart = chartScale(days);" in script
-    for key in ("income", "tax", "net"):
-        assert f"normalizedRatios(days, '{key}', chart)" in script
-
-    # Audit every Number call, so a new raw monetary expression cannot slip
-    # through a blacklist that checks only particular variable names.
-    assert re.findall(r"\bNumber\s*\((.*?)\)", script, re.DOTALL) == [
-        "`${negative ? '-' : ''}${ratio}`"
-    ]
-
-
-def test_dashboard_script_keeps_maximum_chart_ratio_and_role_controls_separate(
+def test_dashboard_script_keeps_role_controls_separate(
     tmp_path,
 ):
     with client(tmp_path) as browser:
         script = browser.get("/static/app.js").text
 
-    assert "const integer = scaled / 1000000n;" in script
-    assert "const fraction = scaled % 1000000n;" in script
     assert r"""const row = document.createElement('div');""" in script
     assert "label.append(reportSelect, text);" in script
     assert "row.append(label, status, toggle);" in script
@@ -389,13 +355,13 @@ def test_storage_dialog_is_desktop_only_and_versions_are_dynamic(tmp_path, monke
     )
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
         release_page = browser.get("/").text
-    assert "<span class='system-state'>V1.0</span>" in release_page
-    assert "<p class='storage-version'>关于 EVE 每日收益 · V1.0.2</p>" in release_page
+    assert "<span class='system-state'>V2.0.0</span>" in release_page
+    assert "<p class='storage-version'>关于 EVE 每日收益 · V2.0.0</p>" in release_page
 
     monkeypatch.setattr(web, "APP_VERSION", "8.7.6", raising=False)
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
         page = browser.get("/").text
-    assert "<span class='system-state'>V8.7</span>" in page
+    assert "<span class='system-state'>V8.7.6</span>" in page
     assert "<p class='storage-version'>关于 EVE 每日收益 · V8.7.6</p>" in page
     assert "<dialog id='data-settings-dialog'" in page
     assert "aria-labelledby='data-settings-title'" in page

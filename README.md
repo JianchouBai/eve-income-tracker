@@ -6,7 +6,7 @@
 
 ### 安装与启动
 
-从项目的 GitHub Releases 下载版本化的 `EVE-Income-Tracker-1.0.2-x64-Setup.exe`。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
+从项目的 GitHub Releases 下载对应版本的 `EVE-Income-Tracker-<版本>-x64-Setup.exe`，当前应用版本为 **2.0.0**。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
 
 安装包按当前 Windows 用户安装，不要求管理员权限，并创建开始菜单和桌面快捷方式。安装完成后直接双击 **EVE Income Tracker**：无需安装 Python，也无需打开终端。程序自带应用代码和页面资源；若电脑缺少 Microsoft Edge WebView2 Runtime，安装程序会调用微软官方引导程序安装它。
 
@@ -65,7 +65,9 @@ EVE 应用只申请只读钱包权限 `esi-wallet.read_character_wallet.v1`。�
 
 每个角色从首次授权成功的精确时刻开始统计。ESI 可能返回该时刻之前的历史，但应用会主动丢弃，不导入也不展示。晚添加的角色有自己的独立起点；停用、重新启用和重新授权都不重置起点。首次自动同步失败也不会改变已保存的起点。
 
-应定期手动同步，因为 ESI 的可回溯历史有限。日期按北京时间 `Asia/Shanghai` 的自然日分组，UTC 16:00 属于次日北京时间 00:00。默认显示最近 30 日，开始和结束日期都包含当天；单次查询最多 366 天，无活动日期补零。
+应定期手动同步，因为 ESI 的可回溯历史有限。日期按北京时间 `Asia/Shanghai` 的自然日分组，UTC 16:00 属于次日北京时间 00:00。顶部收益默认显示当日；点击日期区域按日、周、月循环，周为含当天的最近七个自然日，月为自然月，左右箭头翻阅相邻历史周期。收入、税费、税后收入、类型分项、角色分项和已纳入流水随顶部周期更新。
+
+逐日账本独立于顶部周期，默认选择当前月，可通过页面底部监控台切换月份。默认收纳时，当前月显示本月截至今天最近三天的明细，月初不足三天按实际天数显示；历史月份显示该月最后三天。展开后显示所选整月，无活动日期补零。底层报表接口单次查询最多 366 天。收益汇总、来源类型、角色分项和逐日账本中的 LP 收入目前只提供界面占位，以 `—` 表示尚未接入数据。
 
 - 到账收入是纳入白名单的正向钱包变动，不反推名义税前收益。
 - 已交税费是对应负向税务流水的绝对值，不重复累加附加 `tax` 字段。
@@ -165,7 +167,7 @@ notepad .env
 {
   "eve_client_id": "你的公开 Client ID",
   "eve_callback_url": "http://localhost:8000/auth/callback",
-  "eve_user_agent": "eve-income-tracker/1.0.2 (your-valid-email@example.com)",
+  "eve_user_agent": "eve-income-tracker/2.0.0 (your-valid-email@example.com)",
   "esi_compatibility_date": "2026-05-19"
 }
 ```

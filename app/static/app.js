@@ -1,16 +1,122 @@
 const $ = (id) => document.getElementById(id);
 const csrf = document.querySelector('meta[name=csrf-token]').content;
-let report;
 let reportRequestGeneration = 0;
+let ledgerRequestGeneration = 0;
+let periodMode = 'day';
+let periodAnchor = beijingDate();
+let ledgerMonth = beijingDate().slice(0, 7);
+let ledgerExpanded = false;
+let ledgerDays = [];
 let groups = [];
 let selectedGroupId = null;
 let selectedCharacterIds = new Set();
+let appliedCharacterIds = new Set();
 let charactersById = new Map();
 
 function beijingDate(offset = 0) {
   const date = new Date();
   date.setUTCDate(date.getUTCDate() + offset);
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(date);
+}
+
+function shiftDate(value, offset) {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + offset);
+  return date.toISOString().slice(0, 10);
+}
+
+function monthRange(month) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || month.startsWith('0000')) {
+    throw new Error('请选择有效月份。');
+  }
+  const from = `${month}-01`;
+  const end = new Date(`${from}T00:00:00Z`);
+  end.setUTCMonth(end.getUTCMonth() + 1);
+  end.setUTCDate(0);
+  return { from, to: end.toISOString().slice(0, 10) };
+}
+
+function shiftMonth(month, offset) {
+  const date = new Date(`${monthRange(month).from}T00:00:00Z`);
+  date.setUTCMonth(date.getUTCMonth() + offset);
+  return date.toISOString().slice(0, 7);
+}
+
+function periodRange(mode = periodMode, anchor = periodAnchor) {
+  if (mode === 'month') return monthRange(anchor.slice(0, 7));
+  return { from: mode === 'week' ? shiftDate(anchor, -6) : anchor, to: anchor };
+}
+
+function adjacentPeriod(direction) {
+  return periodMode === 'month'
+    ? `${shiftMonth(periodAnchor.slice(0, 7), direction)}-01`
+    : shiftDate(periodAnchor, direction * (periodMode === 'week' ? 7 : 1));
+}
+
+function updatePeriodControls() {
+  const names = { day: '日', week: '周', month: '月' };
+  const next = { day: '周', week: '月', month: '日' };
+  const { from, to } = periodRange();
+  const today = beijingDate();
+  $('period-kind').textContent = `按${names[periodMode]}显示`;
+  $('period-label').textContent = periodMode === 'month'
+    ? `${from.slice(0, 4)} 年 ${Number(from.slice(5, 7))} 月`
+    : (periodMode === 'week' ? `${from.slice(5)} — ${to.slice(5)}` : `${to === today ? '今天 · ' : ''}${to}`);
+  $('period-mode').setAttribute('aria-label', `当前按${names[periodMode]}显示，${from}${from === to ? '' : ` 至 ${to}`}，点击切换为按${next[periodMode]}显示`);
+  $('period-range').textContent = `北京时间 ${from}${from === to ? '' : ` 至 ${to}`}`;
+  $('period-prev').setAttribute('aria-label', `上一${names[periodMode]}`);
+  $('period-next').setAttribute('aria-label', `下一${names[periodMode]}`);
+  $('period-next').disabled = periodMode === 'month'
+    ? adjacentPeriod(1).slice(0, 7) > today.slice(0, 7)
+    : adjacentPeriod(1) > today;
+}
+
+async function movePeriod(direction) {
+  if (direction > 0 && $('period-next').disabled) return;
+  periodAnchor = adjacentPeriod(direction);
+  updatePeriodControls();
+  await loadSummary();
+}
+
+async function cyclePeriod() {
+  periodMode = { day: 'week', week: 'month', month: 'day' }[periodMode];
+  periodAnchor = beijingDate();
+  updatePeriodControls();
+  await loadSummary();
+}
+
+function visibleLedgerDays(days, month, today, expanded) {
+  const monthly = days.filter(day => day.date.startsWith(`${month}-`));
+  if (expanded) return monthly;
+  return monthly.filter(day => day.date <= today).slice(-3);
+}
+
+function renderLedger() {
+  const visible = visibleLedgerDays(ledgerDays, ledgerMonth, beijingDate(), ledgerExpanded);
+  rows($('daily-table').tBodies[0], visible, [
+    { key: 'date' }, { key: 'income', money: true }, { key: 'tax', money: true },
+    { key: 'net', money: true }, { format: () => '—' },
+  ]);
+  $('ledger-month-label').textContent = `${ledgerMonth.slice(0, 4)} 年 ${Number(ledgerMonth.slice(5))} 月`;
+  $('ledger-caption').textContent = ledgerExpanded ? '整月明细 · 北京时间' : `最近 ${visible.length} 天明细 · 展开可查看整月`;
+  $('ledger-toggle').textContent = ledgerExpanded ? '收起明细' : '展开整月';
+  $('ledger-toggle').setAttribute('aria-expanded', String(ledgerExpanded));
+  $('ledger-next').disabled = ledgerMonth >= beijingDate().slice(0, 7);
+  $('ledger-prev').disabled = ledgerMonth <= '2003-05';
+}
+
+async function selectLedgerMonth(month) {
+  try {
+    monthRange(month);
+    if (month < '2003-05' || month > beijingDate().slice(0, 7)) throw new Error('请选择 2003 年 5 月至当前月份之间的月份。');
+    ledgerMonth = month;
+    ledgerExpanded = false;
+    $('ledger-month').value = month;
+    await loadLedger();
+  } catch (error) {
+    $('ledger-month').value = ledgerMonth;
+    $('ledger-status').textContent = error.message;
+  }
 }
 
 function isk(value, fractionDigits = 2) {
@@ -31,11 +137,10 @@ function checkedCharacterIds() {
   return new Set([...document.querySelectorAll('[data-report-select]:checked')].map((input) => input.value));
 }
 
-function query() {
-  selectedCharacterIds = checkedCharacterIds();
-  const params = new URLSearchParams({ from: $('date-from').value, to: $('date-to').value });
+function query(range = periodRange()) {
+  const params = new URLSearchParams(range);
   params.set('group_id', String(selectedGroupId));
-  selectedCharacterIds.forEach((characterId) => params.append('character_id', characterId));
+  appliedCharacterIds.forEach((characterId) => params.append('character_id', characterId));
   return params;
 }
 
@@ -125,152 +230,67 @@ function breakdown(target, title, items, label) {
   target.replaceChildren();
   const marker = document.createElement('span');
   marker.className = 'section-index';
-  marker.textContent = title === '类型分项' ? '来源' : '舰长';
+  marker.textContent = label === 'category' ? '来源' : '舰长';
   const heading = document.createElement('h2');
   heading.textContent = title;
   target.append(marker, heading);
   if (!items.length) {
     const empty = document.createElement('p');
-    empty.textContent = '暂无数据';
+    empty.className = 'empty-guidance';
+    empty.textContent = '暂无 ISK 收入';
     target.append(empty);
-    return;
   }
   items.forEach((item) => {
-    const line = document.createElement('p');
-    line.textContent = `${item[label]}：${isk(item.net)}`;
+    const line = document.createElement('div');
+    line.className = label === 'category' ? 'breakdown-row' : 'character-income';
+    const name = document.createElement('span');
+    name.className = 'breakdown-name';
+    name.textContent = item[label];
+    const value = document.createElement('strong');
+    value.textContent = isk(item.net);
+    line.append(name, value);
+    if (label === 'name') {
+      const lp = document.createElement('span');
+      lp.className = 'lp-placeholder';
+      lp.textContent = 'LP 收入 —';
+      line.append(lp);
+    }
     target.append(line);
   });
-}
-
-function decimalPart(value) {
-  const match = /^(-?)(\d+)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(String(value));
-  if (!match) return { value: 0n, scale: 0n };
-  const digits = `${match[2]}${match[3] || ''}`.replace(/^0+(?=\d)/, '') || '0';
-  const scale = BigInt((match[3] || '').length) - BigInt(match[4] || '0');
-  return { value: (match[1] === '-' ? -1n : 1n) * BigInt(digits), scale };
-}
-
-function chartScale(days) {
-  const parts = days.flatMap((day) => ['income', 'tax', 'net'].map((key) => decimalPart(day[key])));
-  const scale = parts.reduce((largest, part) => (part.scale > largest ? part.scale : largest), 0n);
-  const values = parts.map((part) => part.value * (10n ** (scale - part.scale)));
-  const maximum = values.reduce((largest, value) => {
-    const absolute = value < 0n ? -value : value;
-    return absolute > largest ? absolute : largest;
-  }, 0n);
-  return { scale, maximum };
-}
-
-function normalizedRatios(days, key, chart) {
-  const parts = days.map((day) => decimalPart(day[key]));
-  const values = parts.map((part) => part.value * (10n ** (chart.scale - part.scale)));
-  const maximum = chart.maximum;
-  if (maximum === 0n) return values.map(() => 0);
-  return values.map((value) => {
-    const negative = value < 0n;
-    const scaled = ((negative ? -value : value) * 1000000n) / maximum;
-    const integer = scaled / 1000000n;
-    const fraction = scaled % 1000000n;
-    const ratio = `${integer}.${fraction.toString().padStart(6, '0')}`;
-    return Number(`${negative ? '-' : ''}${ratio}`);
-  });
-}
-
-function drawSeries(context, ratios, color, width, height) {
-  if (!ratios.length) return;
-  const left = 10;
-  const right = width - 10;
-  const top = 16;
-  const bottom = height - 30;
-  const center = top + ((bottom - top) / 2);
-  context.beginPath();
-  ratios.forEach((ratio, index) => {
-    const x = ratios.length === 1 ? width / 2 : left + ((index / (ratios.length - 1)) * (right - left));
-    const y = center - ratio * ((bottom - top) / 2);
-    if (index === 0) context.moveTo(x, y);
-    else context.lineTo(x, y);
-  });
-  context.strokeStyle = color;
-  context.lineWidth = color === '#e6eef2' ? 2.4 : 1.6;
-  context.lineJoin = 'round';
-  context.lineCap = 'round';
-  context.stroke();
-}
-
-function draw(days) {
-  const canvas = $('trend-canvas');
-  const fallback = $('trend-fallback');
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    fallback.textContent = '图表不可用；请查看下方每日明细表中的收入、税费和税后收入。';
-    fallback.classList.add('chart-fallback-visible');
-    return;
+  if (label === 'category') {
+    const lp = document.createElement('div');
+    lp.className = 'breakdown-row lp-row';
+    const name = document.createElement('span');
+    name.textContent = 'LP 收入';
+    const value = document.createElement('strong');
+    value.textContent = '— LP';
+    lp.append(name, value);
+    target.append(lp);
   }
-  fallback.classList.remove('chart-fallback-visible');
-  const ratio = window.devicePixelRatio || 1;
-  const width = canvas.clientWidth;
-  const height = canvas.clientHeight;
-  canvas.width = width * ratio;
-  canvas.height = height * ratio;
-  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-  ctx.font = '11px "Microsoft YaHei UI", sans-serif';
-  ctx.fillStyle = 'rgba(230, 238, 242, 0.42)';
-  ctx.textBaseline = 'bottom';
-  ctx.setLineDash([3, 7]);
-  [16, height / 2 - 7, height - 30].forEach((y, index) => {
-    ctx.beginPath();
-    ctx.moveTo(10, y);
-    ctx.lineTo(width - 10, y);
-    ctx.strokeStyle = index === 1 ? 'rgba(114, 214, 207, 0.28)' : 'rgba(41, 64, 77, 0.72)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  });
-  ctx.setLineDash([]);
-
-  if (days.length) {
-    const labelStep = Math.max(1, Math.ceil((days.length - 1) / 4));
-    days.forEach((day, index) => {
-      if (index % labelStep !== 0 && index !== days.length - 1) return;
-      const x = days.length === 1 ? width / 2 : 10 + ((index / (days.length - 1)) * (width - 20));
-      ctx.textAlign = index === 0 ? 'left' : (index === days.length - 1 ? 'right' : 'center');
-      ctx.fillText(day.date.slice(5), x, height - 5);
-    });
-  }
-
-  const chart = chartScale(days);
-  drawSeries(ctx, normalizedRatios(days, 'income', chart), '#72d6cf', width, height);
-  drawSeries(ctx, normalizedRatios(days, 'tax', chart), '#e9a95f', width, height);
-  drawSeries(ctx, normalizedRatios(days, 'net', chart), '#e6eef2', width, height);
-  canvas.setAttribute('aria-label', '收入（青色）、税费（琥珀色）和税后收入（白色）趋势图；下方每日明细表提供等价文本数据。');
-  fallback.textContent = `图表文本降级：${days.map((day) => `${day.date}，到账 ${isk(day.income)}，税费 ${isk(day.tax)}，税后 ${isk(day.net)}`).join('；') || '暂无数据。'}`;
 }
 
 function render(data, entries) {
-  report = data;
   $('summary-income').textContent = isk(data.income, 0);
   $('summary-tax').textContent = isk(data.tax, 0);
   $('summary-net').textContent = isk(data.net, 0);
-  rows($('daily-table').tBodies[0], data.daily, [
-    { key: 'date' }, { key: 'income', money: true }, { key: 'tax', money: true }, { key: 'net', money: true },
-  ]);
   breakdown($('category-breakdown'), '类型分项', data.categories, 'category');
   breakdown($('character-breakdown'), '角色分项', data.characters, 'name');
   rows($('entry-details').querySelector('tbody'), entries.entries, [
     { key: 'date' }, { key: 'character_name' }, { key: 'category' }, { key: 'amount', format: (x) => isk(x.amount) }, { key: 'description' },
   ]);
-  draw(data.daily);
 }
 
-async function load() {
+async function loadSummary() {
   const generation = ++reportRequestGeneration;
   const requestedGroupId = selectedGroupId;
   if (!requestedGroupId) {
     $('report-deck').hidden = true;
     return;
   }
-  $('report-deck').hidden = true;
-  $('report-deck').setAttribute('aria-busy', 'true');
+  $('report-deck').hidden = false;
+  $('summary-content').hidden = true;
+  $('entry-details').hidden = true;
+  $('summary-content').setAttribute('aria-busy', 'true');
   message('正在加载当前角色组报表…');
   try {
     const parameters = query();
@@ -279,14 +299,48 @@ async function load() {
     ]);
     if (generation !== reportRequestGeneration || requestedGroupId !== selectedGroupId) return;
     render(data, entries);
-    $('report-deck').hidden = false;
+    $('summary-content').hidden = false;
+    $('entry-details').hidden = false;
     message('报表已更新。');
   } catch (error) {
     if (generation !== reportRequestGeneration || requestedGroupId !== selectedGroupId) return;
     message(error.message || '无法加载报表，请稍后再试。', true);
   } finally {
-    if (generation === reportRequestGeneration) $('report-deck').removeAttribute('aria-busy');
+    if (generation === reportRequestGeneration) $('summary-content').removeAttribute('aria-busy');
   }
+}
+
+async function loadLedger() {
+  const generation = ++ledgerRequestGeneration;
+  const requestedGroupId = selectedGroupId;
+  const requestedMonth = ledgerMonth;
+  if (!requestedGroupId) return;
+  ledgerDays = [];
+  renderLedger();
+  $('daily-table').hidden = true;
+  $('ledger-toggle').disabled = true;
+  $('monthly-ledger').setAttribute('aria-busy', 'true');
+  $('ledger-status').textContent = '正在加载月度账本…';
+  try {
+    const data = await get('/api/dashboard?' + query(monthRange(requestedMonth)));
+    if (generation !== ledgerRequestGeneration || requestedGroupId !== selectedGroupId || requestedMonth !== ledgerMonth) return;
+    ledgerDays = data.daily;
+    renderLedger();
+    $('daily-table').hidden = false;
+    $('ledger-toggle').disabled = false;
+    $('ledger-status').textContent = '';
+  } catch (error) {
+    if (generation !== ledgerRequestGeneration || requestedGroupId !== selectedGroupId || requestedMonth !== ledgerMonth) return;
+    $('ledger-status').textContent = error.message || '无法加载月度账本，请重试。';
+  } finally {
+    if (generation === ledgerRequestGeneration) $('monthly-ledger').removeAttribute('aria-busy');
+  }
+}
+
+async function load() {
+  selectedCharacterIds = checkedCharacterIds();
+  appliedCharacterIds = new Set(selectedCharacterIds);
+  await Promise.all([loadSummary(), loadLedger()]);
 }
 
 function roleStatus(character) {
@@ -764,8 +818,19 @@ document.addEventListener('DOMContentLoaded', () => {
   bindDesktopAuthorization();
   bindDataSettings();
   if (document.body.dataset.authenticated !== 'true') return;
-  $('date-to').value = beijingDate();
-  $('date-from').value = beijingDate(-29);
+  updatePeriodControls();
+  $('ledger-month').value = ledgerMonth;
+  $('ledger-month').max = beijingDate().slice(0, 7);
+  $('period-prev').addEventListener('click', () => movePeriod(-1));
+  $('period-next').addEventListener('click', () => movePeriod(1));
+  $('period-mode').addEventListener('click', cyclePeriod);
+  $('ledger-toggle').addEventListener('click', () => {
+    ledgerExpanded = !ledgerExpanded;
+    renderLedger();
+  });
+  $('ledger-month').addEventListener('change', event => selectLedgerMonth(event.target.value));
+  $('ledger-prev').addEventListener('click', () => selectLedgerMonth(shiftMonth(ledgerMonth, -1)));
+  $('ledger-next').addEventListener('click', () => selectLedgerMonth(shiftMonth(ledgerMonth, 1)));
   $('role-filters').addEventListener('submit', (event) => { event.preventDefault(); load(); });
   $('sync-button').addEventListener('click', sync);
   $('create-group-button').addEventListener('click', createGroup);
@@ -785,5 +850,4 @@ document.addEventListener('DOMContentLoaded', () => {
     await load();
   });
   roles().then(load).catch((error) => message(error.message || '无法加载角色，请稍后再试。', true));
-  addEventListener('resize', () => report && draw(report.daily));
 });
