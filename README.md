@@ -6,7 +6,7 @@
 
 ### 安装与启动
 
-从项目的 GitHub Releases 下载对应版本的 `EVE-Income-Tracker-<版本>-x64-Setup.exe`，当前应用版本为 **2.0.3**。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
+从项目的 GitHub Releases 下载对应版本的 `EVE-Income-Tracker-<版本>-x64-Setup.exe`，当前应用版本为 **2.0.4**。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
 
 安装包按当前 Windows 用户安装，不要求管理员权限，并创建开始菜单和桌面快捷方式。安装完成后直接双击 **EVE Income Tracker**：无需安装 Python，也无需打开终端。程序自带应用代码和页面资源；若电脑缺少 Microsoft Edge WebView2 Runtime，安装程序会调用微软官方引导程序安装它。
 
@@ -167,7 +167,7 @@ notepad .env
 {
   "eve_client_id": "你的公开 Client ID",
   "eve_callback_url": "http://localhost:8000/auth/callback",
-  "eve_user_agent": "eve-income-tracker/2.0.3 (your-valid-email@example.com)",
+  "eve_user_agent": "eve-income-tracker/2.0.4 (your-valid-email@example.com)",
   "esi_compatibility_date": "2026-05-19"
 }
 ```

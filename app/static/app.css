@@ -233,8 +233,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .sync-panel { margin: 18px 24px 24px; padding: 18px 20px; border: 1px solid #dae6e9; border-radius: 14px; background: var(--blue); }
 .sync-heading { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .sync-panel h2 { margin: 0; color: #426e7c; font-family: var(--font-body); font-size: var(--text-sm); font-weight: 550; }
-.sync-action { min-height: 36px; padding: 0.45rem 0.75rem; border-color: #b8d1c1; background: var(--surface-solid); color: var(--ice); font-size: var(--text-xs); box-shadow: none; }
-.sync-action:hover:not(:disabled) { border-color: #9fbeaa; background: #eaf4ec; }
+.sync-action { min-height: 44px; padding: 0.65rem 1rem; border-color: var(--ice); background: var(--ice); color: white; font-size: var(--text-base); font-weight: 600; box-shadow: none; }
+.sync-action:hover:not(:disabled) { border-color: #245d44; background: #245d44; }
 .sync-panel p, .sync-panel ul { margin: 0; padding: 0; color: var(--muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .sync-panel ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; list-style: none; }
 :focus-visible { outline: 2px solid #44856a; outline-offset: 4px; }
