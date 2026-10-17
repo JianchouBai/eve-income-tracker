@@ -74,6 +74,7 @@ assert.equal(isk('-0.019'), '-0.01 ISK');
     return { ok: true, json: async () => data };
   };
   await load();
+  assert(element('period-range').textContent.includes('2026-10-17'), 'displayed report has no date context');
   assert(requests.some(path => path.includes('from=2026-10-17&to=2026-10-17')));
   assert(requests.some(path => path.includes('from=2026-10-01&to=2026-10-31')));
   assert(requests.every(path => path.includes('group_id=7') && path.includes('character_id=42')));
@@ -105,16 +106,49 @@ assert.equal(isk('-0.019'), '-0.01 ISK');
   assert(requests.every(path => !path.includes('character_id=43')), 'update report did not apply character choice to both regions');
 
   vm.runInThisContext("periodAnchor = '2026-10-16';");
+  const displayedContext = element('period-range').textContent;
+  updatePeriodControls();
+  assert.equal(element('period-range').textContent, displayedContext, 'navigation relabeled existing totals before loading the new period');
   const oldRequest = loadSummary();
+  assert.equal(element('summary-content').hidden, false, 'period navigation hid the current report while loading');
+  assert.equal(element('entry-details').hidden, false, 'period navigation hid the entry panel while loading');
+  assert.equal(element('summary-content').attributes['aria-busy'], 'true');
   vm.runInThisContext("periodAnchor = '2026-10-17';");
   await loadSummary();
   pendingOldSummary();
   await oldRequest;
   assert.equal(element('summary-net').textContent, '17 ISK', 'stale response overwrote current period');
 
+  const loadedLedger = element('daily-table').children;
+  let finishLedger;
+  global.fetch = async () => {
+    await new Promise(resolve => { finishLedger = resolve; });
+    return { ok: true, json: async () => ({ daily: days }) };
+  };
+  const ledgerRefresh = loadLedger();
+  assert.equal(element('daily-table').hidden, false, 'month navigation hid the current ledger while loading');
+  assert.equal(element('daily-table').children, loadedLedger, 'month navigation cleared existing ledger rows before the response');
+  finishLedger();
+  await ledgerRefresh;
+
   const previousLedger = element('daily-table').children;
   global.fetch = async () => ({ ok: false, json: async () => ({ error: { message: 'offline' } }) });
   await loadSummary();
-  assert.equal(element('status-message').textContent, 'offline');
+  assert(element('status-message').textContent.includes('offline'));
+  assert.equal(element('summary-content').hidden, false, 'failed refresh hid the last successful report');
+  assert.equal(element('summary-net').textContent, '17 ISK');
   assert.equal(element('daily-table').children, previousLedger, 'summary failure destroyed monthly ledger');
+  await loadLedger();
+  assert.equal(element('daily-table').hidden, false, 'failed refresh hid the last successful ledger');
+  assert.equal(element('daily-table').children, previousLedger, 'failed ledger refresh destroyed existing rows');
+  assert.equal(element('ledger-toggle').disabled, false, 'failed ledger refresh left existing rows unusable');
+
+  const reportContext = element('period-range').textContent;
+  const ledgerContext = element('ledger-caption').textContent;
+  vm.runInThisContext("selectedGroupId = '8';");
+  await load();
+  assert.equal(element('period-range').textContent, reportContext, 'failed group switch relabeled the old report');
+  assert.equal(element('ledger-caption').textContent, ledgerContext, 'failed group switch relabeled the old ledger');
+  assert(element('period-range').textContent.includes('7'), 'retained report does not identify its source group');
+  assert(element('ledger-caption').textContent.includes('7'), 'retained ledger does not identify its source group');
 })().catch(error => { console.error(error); process.exitCode = 1; });
