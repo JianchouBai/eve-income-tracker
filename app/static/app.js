@@ -87,6 +87,26 @@ function bindEntryDisclosure() {
   });
 }
 
+function bindMonitorDisclosure() {
+  const monitor = $('monitor');
+  const content = $('monitor-content');
+  const toggle = $('monitor-toggle');
+  toggle.addEventListener('click', () => {
+    const collapsed = toggle.getAttribute('aria-expanded') === 'true';
+    if (collapsed && content.contains(document.activeElement)) toggle.focus();
+    transitionContent($('monitor-heading'), () => {
+      monitor.setAttribute('data-collapsed', String(collapsed));
+      toggle.setAttribute('aria-expanded', String(!collapsed));
+      $('monitor-toggle-label').textContent = collapsed ? '展开监控台' : '收起监控台';
+      $('monitor-heading-copy').hidden = collapsed;
+      $('monitor-return').hidden = collapsed;
+      $('monitor-summary').hidden = !collapsed;
+      content.inert = collapsed;
+      content.setAttribute('aria-hidden', String(collapsed));
+    });
+  });
+}
+
 function beijingDate(offset = 0) {
   const date = new Date();
   date.setUTCDate(date.getUTCDate() + offset);
@@ -590,6 +610,8 @@ function renderRoles() {
   const members = group ? characters.filter((character) => String(character.group_id) === selectedGroupId) : [];
   const ungrouped = characters.filter((character) => character.group_id === null);
   $('active-group-name').textContent = group ? `${group.name} · ${members.length} 名` : '尚未创建角色组';
+  $('monitor-group-name').textContent = group ? group.name : '暂无角色组';
+  $('monitor-character-count').textContent = `${members.length} 名角色`;
 
   const memberRegion = $('enable-region');
   memberRegion.replaceChildren();
@@ -945,6 +967,7 @@ document.addEventListener('DOMContentLoaded', () => {
   bindDataSettings();
   if (document.body.dataset.authenticated !== 'true') return;
   bindEntryDisclosure();
+  bindMonitorDisclosure();
   updatePeriodControls();
   $('ledger-month').value = ledgerMonth;
   $('ledger-month').max = beijingDate().slice(0, 7);

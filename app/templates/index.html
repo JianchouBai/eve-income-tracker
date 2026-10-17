@@ -136,61 +136,73 @@
           </div>
         </div>
         <aside id='monitor' class='command-rail' aria-labelledby='monitor-title'>
-          <div class='rail-heading'>
-            <div><span class='section-index'>监控台</span><h2 id='monitor-title'>角色与账本管理</h2><p>管理角色组与成员，选择账本月份，随时同步钱包。</p></div>
-            <a class='monitor-jump' href='#dashboard'>返回收益概览 <span aria-hidden='true'>↑</span></a>
+          <div id='monitor-heading' class='rail-heading'>
+            <div id='monitor-heading-copy' class='rail-heading-copy'><span class='section-index'>监控台</span><h2 id='monitor-title'>角色与账本管理</h2><p>管理角色组与成员，选择账本月份，随时同步钱包。</p></div>
+            <p id='monitor-summary' class='monitor-summary' aria-live='polite' hidden><strong id='monitor-group-name'>正在加载角色组…</strong><span id='monitor-character-count'>0 名角色</span></p>
+            <div class='rail-heading-actions'>
+              <a id='monitor-return' class='monitor-jump' href='#dashboard'>返回收益概览 <span aria-hidden='true'>↑</span></a>
+              <button id='monitor-toggle' class='monitor-toggle' type='button' aria-expanded='true' aria-controls='monitor-content'><span id='monitor-toggle-label'>收起监控台</span><svg viewBox='0 0 24 24' aria-hidden='true'><path d='m6 14 6-6 6 6'/></svg></button>
+            </div>
           </div>
 
           <form id='role-filters' class='filters'>
-            <fieldset class='group-scope'>
-              <legend>角色组范围</legend>
-              <div class='group-picker'>
-                <label for='group-select'>角色组</label>
-                <select id='group-select' aria-describedby='group-guidance'>
-                  <option value=''>正在加载角色组…</option>
-                </select>
-              </div>
-              <p id='group-guidance' class='field-guidance'>钱包同步、收入报表和组内转账排除都以当前组为范围。</p>
-              <div class='group-editor'>
-                <label for='group-name'>组名</label>
-                <input id='group-name' type='text' maxlength='50' autocomplete='off' placeholder='例如：深空小队'>
-                <div class='group-actions'>
-                  <button id='create-group-button' type='button'>创建组</button>
-                  <button id='rename-group-button' type='button'>重命名</button>
-                  <button id='delete-group-button' type='button'>删除组</button>
-                </div>
-              </div>
+            <div id='monitor-content' class='monitor-content'>
+              <div class='monitor-controls'>
+                <div class='filter-fields'>
+                  <fieldset class='group-scope'>
+                    <legend>角色组范围</legend>
+                    <div class='group-picker'>
+                      <label for='group-select'>角色组</label>
+                      <select id='group-select' aria-describedby='group-guidance'>
+                        <option value=''>正在加载角色组…</option>
+                      </select>
+                    </div>
+                    <p id='group-guidance' class='field-guidance'>钱包同步、收入报表和组内转账排除都以当前组为范围。</p>
+                    <div class='group-editor'>
+                      <label for='group-name'>组名</label>
+                      <input id='group-name' type='text' maxlength='50' autocomplete='off' placeholder='例如：深空小队'>
+                      <div class='group-actions'>
+                        <button id='create-group-button' type='button'>创建组</button>
+                        <button id='rename-group-button' type='button'>重命名</button>
+                        <button id='delete-group-button' type='button'>删除组</button>
+                      </div>
+                    </div>
 
-            </fieldset>
-            <fieldset class='membership-scope'>
-              <legend>角色管理</legend>
-              <section class='membership-rail' aria-labelledby='active-group-name'>
-                <div class='membership-heading'>
-                  <span>当前角色组</span>
-                  <h3 id='active-group-name'>尚未选择</h3>
+                  </fieldset>
+                  <fieldset class='membership-scope'>
+                    <legend>角色管理</legend>
+                    <section class='membership-rail' aria-labelledby='active-group-name'>
+                      <div class='membership-heading'>
+                        <span>当前角色组</span>
+                        <h3 id='active-group-name'>尚未选择</h3>
+                      </div>
+                      <div id='enable-region' aria-live='polite'>正在加载角色…</div>
+                      <p class='field-guidance'>勾选角色后点击“更新报表”，同时应用到顶部收益与月度账本。</p>
+                      <div class='ungrouped-block'>
+                        <h3>未分组角色</h3>
+                        <div id='ungrouped-region' aria-live='polite'>正在加载角色…</div>
+                      </div>
+                    </section>
+                  </fieldset>
+                  <fieldset class='ledger-scope'>
+                    <legend>账本月份</legend>
+                    <div class='month-picker'>
+                      <label for='ledger-month'>选择月份</label>
+                      <input id='ledger-month' type='month' min='2003-05' aria-describedby='ledger-guidance'>
+                      <div class='month-actions'><button id='ledger-prev' type='button'>← 上个月</button><button id='ledger-next' type='button'>下个月 →</button></div>
+                    </div>
+                    <p id='ledger-guidance' class='field-guidance'>仅切换逐日账本的月份；顶部收益可独立按日、周、月查看。</p>
+                  </fieldset>
                 </div>
-                <div id='enable-region' aria-live='polite'>正在加载角色…</div>
-                <p class='field-guidance'>勾选角色后点击“更新报表”，同时应用到顶部收益与月度账本。</p>
-                <div class='ungrouped-block'>
-                  <h3>未分组角色</h3>
-                  <div id='ungrouped-region' aria-live='polite'>正在加载角色…</div>
+                <div class='management-actions'>
+                  <a id='reauthorize-link' class='rail-link' href='{{ "#" if configuration_issues or runtime_mode == "desktop" else "/auth/login" }}'{% if runtime_mode == "desktop" and not configuration_issues %} data-desktop-authorization='true'{% endif %}>重新授权或添加角色</a>
+                  <button id='report-button' class='button button-secondary' type='submit'>更新报表</button>
                 </div>
-              </section>
-            </fieldset>
-            <fieldset class='ledger-scope'>
-              <legend>账本月份</legend>
-              <div class='month-picker'>
-                <label for='ledger-month'>选择月份</label>
-                <input id='ledger-month' type='month' min='2003-05' aria-describedby='ledger-guidance'>
-                <div class='month-actions'><button id='ledger-prev' type='button'>← 上个月</button><button id='ledger-next' type='button'>下个月 →</button></div>
               </div>
-              <p id='ledger-guidance' class='field-guidance'>仅切换逐日账本的月份；顶部收益可独立按日、周、月查看。</p>
-            </fieldset>
+            </div>
             <div class='filter-actions'>
-              <button id='report-button' class='button button-secondary' type='submit'>更新报表</button>
               <button id='sync-button' class='button button-primary' type='button'>同步钱包流水</button>
             </div>
-            <a id='reauthorize-link' class='rail-link' href='{{ "#" if configuration_issues or runtime_mode == "desktop" else "/auth/login" }}'{% if runtime_mode == "desktop" and not configuration_issues %} data-desktop-authorization='true'{% endif %}>重新授权或添加角色</a>
           </form>
 
           <section id='sync-results' class='sync-panel' aria-live='polite'>
