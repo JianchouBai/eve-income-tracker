@@ -31,11 +31,12 @@ from app.data_location_controller import DataLocationController, DataLocationErr
 from app.desktop_control import DesktopControl
 from app.desktop_session import DesktopLaunchTokenStore, DesktopSessionError
 from app.esi import EsiError
+from app.lp_reporting import LpReportRow, build_lp_report
 from app.lp_storage import LpRepository
 from app.models import CharacterGroupRecord, CharacterRecord
 from app.reporting import BEIJING, build_dashboard, classify_entry, parse_date_range
 from app.security import TokenCipher
-from app.sso import SsoClient, SsoError
+from app.sso import PROJECTS_SCOPE, SsoClient, SsoError
 from app.storage import (
     CharacterGroupRepository,
     CharacterRepository,
@@ -90,6 +91,8 @@ SYNC_MESSAGES = {
 }
 
 LP_MESSAGES = {
+    "lp_not_covered": "部分日期尚无 LP 统计，请同步收益。",
+    "lp_partial_start": "所选区间包含 LP 建立基线之前的时间。",
     "lp_scope_required": "LP 待授权，请为此角色追加军团项目读取权限。",
     "project_permission_denied": "无法读取军团项目，已保留 LP 历史。",
     "project_not_found": "未找到 LP 对账项目。",
@@ -261,7 +264,38 @@ def _totals(value) -> dict:
     }
 
 
-def _public_character(record: CharacterRecord) -> dict:
+def serialize_lp(row: LpReportRow) -> dict:
+    return {
+        "gross": _decimal(row.amounts.gross),
+        "deduction": _decimal(row.amounts.deduction),
+        "net": _decimal(row.amounts.net),
+        "has_coverage": row.coverage.has_coverage,
+        "complete": row.coverage.complete,
+        "started_at": row.coverage.started_at.isoformat()
+        if row.coverage.started_at
+        else None,
+        "warnings": [_lp_error(code) for code in row.coverage.warnings],
+    }
+
+
+def _public_character(
+    record: CharacterRecord, repository: LpRepository | None = None
+) -> dict:
+    tracks, problems = (), ()
+    if repository is not None:
+        history = repository.report_history(
+            {record.character_id},
+            record.tracking_started_at,
+            record.tracking_started_at,
+        )
+        tracks = history.tracking
+        problems = tuple(p for p in history.problems if p.ended_at is None)
+    status = "ok" if tracks else "baseline_required"
+    error = None
+    if record.authorization_required or PROJECTS_SCOPE not in record.granted_scopes:
+        status, error = "authorization_required", _lp_error("lp_scope_required")
+    elif problems:
+        status, error = "unavailable", _lp_error(problems[-1].code)
     return {
         "character_id": record.character_id,
         "name": record.name,
@@ -272,6 +306,17 @@ def _public_character(record: CharacterRecord) -> dict:
         if record.last_synced_at
         else None,
         "group_id": record.group_id,
+        "lp": {
+            "status": status,
+            "started_at": min(t.started_at for t in tracks).isoformat()
+            if tracks
+            else None,
+            "last_synced_at": max(t.last_success_at for t in tracks).isoformat()
+            if tracks
+            else None,
+            "error": error,
+            "warnings": [_lp_error(p.code) for p in problems],
+        },
     }
 
 
@@ -314,6 +359,9 @@ def create_app(
     )
     if runtime.mode != settings.runtime_mode:
         raise ValueError("runtime mode must match settings")
+
+    if services.lp is None:
+        services.lp = LpRepository(services.characters.database)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -830,7 +878,8 @@ def create_app(
         _require_viewer(request)
         return {
             "characters": [
-                _public_character(record) for record in services.characters.list_all()
+                _public_character(record, services.lp)
+                for record in services.characters.list_all()
             ]
         }
 
@@ -902,7 +951,7 @@ def create_app(
             raise WebError(404, "unknown_character", "所选角色不存在。") from None
         except UnknownGroupError:
             raise WebError(404, "unknown_group", "所选角色组不存在。") from None
-        return {"character": _public_character(record)}
+        return {"character": _public_character(record, services.lp)}
 
     @app.get("/api/dashboard")
     async def dashboard(request: Request):
@@ -914,6 +963,10 @@ def create_app(
             period,
             group_member_ids=member_ids,
         )
+        lp_history = services.lp.report_history(
+            selected, period.start_utc, period.end_utc_exclusive
+        )
+        lp_report = build_lp_report(lp_history, selected, period)
         return {
             "group_id": group.group_id,
             "group_name": group.name,
@@ -921,14 +974,25 @@ def create_app(
             "to": period.end.isoformat(),
             "selected_ids": sorted(report.selected_ids),
             **_totals(report),
+            "lp": serialize_lp(lp_report.total),
             "daily": [
-                {"date": row.date.isoformat(), **_totals(row)} for row in report.daily
+                {
+                    "date": row.date.isoformat(),
+                    **_totals(row),
+                    "lp": serialize_lp(lp_report.daily[row.date]),
+                }
+                for row in report.daily
             ],
             "categories": [
                 {"category": row.category, **_totals(row)} for row in report.categories
             ],
             "characters": [
-                {"character_id": row.character_id, "name": row.name, **_totals(row)}
+                {
+                    "character_id": row.character_id,
+                    "name": row.name,
+                    **_totals(row),
+                    "lp": serialize_lp(lp_report.characters[row.character_id]),
+                }
                 for row in report.characters
             ],
         }
@@ -982,7 +1046,12 @@ def create_app(
         if record is None:
             raise WebError(404, "unknown_character", "所选角色不存在。")
         services.characters.set_enabled(character_id, payload.enabled)
-        return {"character": {**_public_character(record), "enabled": payload.enabled}}
+        return {
+            "character": {
+                **_public_character(record, services.lp),
+                "enabled": payload.enabled,
+            }
+        }
 
     @app.post("/api/sync", dependencies=[Depends(_require_csrf)])
     async def synchronize(request: Request):

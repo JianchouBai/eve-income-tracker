@@ -974,6 +974,7 @@ def test_character_api_exposes_only_public_fields(context):
             "tracking_started_at",
             "last_synced_at",
             "group_id",
+            "lp",
         }
         assert rows[1]["authorization_required"] is True
         assert "private-" not in response.text
@@ -997,7 +998,7 @@ def test_dashboard_defaults_to_latest_thirty_beijing_days_and_enabled_roles(cont
             "7.9",
         )
         assert len(report["daily"]) == 30
-        assert report["daily"][0] == {
+        assert {k: v for k, v in report["daily"][0].items() if k != "lp"} == {
             "date": "2026-08-31",
             "income": "0",
             "tax": "0",
@@ -2061,3 +2062,42 @@ def test_sync_reports_lp_status_separately_and_sanitizes_unknown_codes(context):
             headers=csrf_headers(client, settings),
         )
         assert "private-secret" not in response.text
+
+
+def test_dashboard_lp_uses_same_role_selection_and_keeps_isk_fields(context):
+    from test_lp_storage import project
+
+    from app.lp_models import LpContribution, LpObservation
+    from app.lp_storage import LpRepository
+
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        group_id = seed_reports(services, clock)
+        before = client.get(f"/api/dashboard?group_id={group_id}").json()
+        repo = LpRepository(services.characters.database)
+        for char, first, second in [(101, 100, 200), (202, 100, 300)]:
+            repo.commit_observation(
+                LpObservation(
+                    char,
+                    project(),
+                    LpContribution(first),
+                    clock.now_utc() - timedelta(hours=1),
+                )
+            )
+            repo.commit_observation(
+                LpObservation(char, project(), LpContribution(second), clock.now_utc())
+            )
+        data = client.get(f"/api/dashboard?group_id={group_id}").json()
+        assert data["lp"]["net"] == "95"
+        assert [data[k] for k in ["income", "tax", "net"]] == [
+            before[k] for k in ["income", "tax", "net"]
+        ]
+        assert data["categories"] == before["categories"]
+        assert all("lp" in row for row in data["daily"])
+        selected = client.get(
+            f"/api/dashboard?group_id={group_id}&character_id=202"
+        ).json()
+        assert selected["lp"]["net"] == "190"
+        assert selected["characters"][0]["lp"]["net"] == "190"
+        assert "granted_scopes" not in client.get("/api/characters").text
