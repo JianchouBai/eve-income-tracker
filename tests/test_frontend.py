@@ -375,8 +375,8 @@ def test_storage_dialog_is_desktop_only_and_versions_are_dynamic(tmp_path, monke
     )
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
         release_page = browser.get("/").text
-    assert "<span class='system-state'>V2.0.5</span>" in release_page
-    assert "<p class='storage-version'>关于 EVE 每日收益 · V2.0.5</p>" in release_page
+    assert "<span class='system-state'>V2.1.0</span>" in release_page
+    assert "<p class='storage-version'>关于 EVE 每日收益 · V2.1.0</p>" in release_page
 
     monkeypatch.setattr(web, "APP_VERSION", "8.7.6", raising=False)
     with TestClient(create_app(settings, services, Clock(), runtime)) as browser:
