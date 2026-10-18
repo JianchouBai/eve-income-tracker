@@ -188,13 +188,33 @@ vm.runInThisContext("ledgerMonth = '2026-10'; ledgerExpanded = true; ledgerDays 
 renderLedger();
 assert.deepEqual(
   element('daily-table').children[0].children.map(child => child.textContent),
-  ['2026-10-06', '10.10 ISK', '2.29 ISK', '7.80 ISK', '—'],
+  ['2026-10-06', '10.10 ISK', '2.29 ISK', '7.80 ISK', '— LP'],
 );
 assert.equal(element('category-breakdown').children[2].children[1].textContent, '25.00 ISK');
 assert.equal(element('category-breakdown').children[3].children[1].textContent, '— LP');
 assert.equal(element('character-breakdown').children[2].children[1].textContent, '-0.01 ISK');
-assert.equal(element('character-breakdown').children[2].children[2].textContent, 'LP 收入 —');
+assert.equal(element('character-breakdown').children[2].children[2].textContent, 'C 海军 — LP');
 assert.equal(element('entry-details').children[0].children[3].textContent, '-3,911,829.99 ISK');
+assert.equal(lp('190000'), '190,000');
+assert.equal(lp('0.95'), '0.95');
+assert.equal(lp('9007199254740993.95'), '9,007,199,254,740,993.95');
+assert.equal(lpReading({net:'0',has_coverage:false}), '— LP');
+assert.equal(lpReading({net:'0',has_coverage:true}), '0 LP');
+const knownLp = {net:'190000',has_coverage:true,complete:false,
+  started_at:'2026-10-01T00:00:00Z',warnings:[{message:'部分角色待授权'}]};
+render({income:'100',tax:'0',net:'100',lp:knownLp,categories:[{category:'bounty',net:'100'}],
+  characters:[{name:'pilot',net:'100',lp:knownLp}]}, {entries:[]});
+assert.equal(element('summary-lp').textContent,'190,000 LP');
+assert.match(element('lp-note').textContent,/统计不完整/);
+assert.equal(element('category-breakdown').children[3].children[1].textContent,'190,000 LP');
+assert.match(element('character-breakdown').children[2].children[2].textContent,/190,000 LP/);
+vm.runInThisContext("ledgerDays = [{date:'2026-10-06',income:'0',tax:'0',net:'0',lp:{net:'190000',has_coverage:true}}];");
+renderLedger();
+assert.equal(element('daily-table').children[0].children[4].textContent,'190,000 LP');
+renderSyncResults([{character_id:1,status:'ok',new_count:2,
+  lp:{status:'authorization_required',error:{message:'LP 待授权'},warnings:[]}}]);
+assert.match(element('sync-results').children[0].children[0].textContent,/LP 待授权/);
+assert.match(element('sync-results').children[0].children[0].textContent,/新增 2/);
 """
     result = subprocess.run(
         [node, "-e", script, str(Path(__file__).parents[1] / "app/static/app.js")],

@@ -19,7 +19,7 @@
         <div>
           <p class='context-line'>舰长个人账本 · 北京时间</p>
           <h1 id='page-title'>EVE 每日收益</h1>
-          <p class='lede'>读取角色钱包流水，记录每个自然日真正落袋的 ISK。只读权限 <code>esi-wallet.read_character_wallet.v1</code>；首次授权前的历史不会纳入。</p>
+          <p class='lede'>读取角色钱包和军团项目，分别记录到账 ISK 与 C 海军 LP。只读权限 <code>esi-wallet.read_character_wallet.v1</code>、<code>esi-corporations.read_projects.v1</code>；ISK 从首次授权后统计，LP 从首次成功同步建立基线。</p>
         </div>
       </div>
       <div class='masthead-action'>
@@ -97,9 +97,9 @@
               </article>
             </div>
             <article class='lp-reading'>
-              <p>所选区间 LP 收入</p>
+              <p>所选区间 C 海军 LP</p>
               <strong id='summary-lp'>— <small>LP</small></strong>
-              <span class='lp-note'>LP 收入暂未接入</span>
+              <span id='lp-note' class='lp-note' aria-live='polite'>按同步日统计，扣除 5%</span>
             </article>
           </section>
 
@@ -205,7 +205,7 @@
           <section id='wallet-sync' class='sync-panel' aria-labelledby='sync-title'>
             <div class='sync-heading'>
               <h2 id='sync-title'>同步记录</h2>
-              <button id='sync-button' class='button sync-action' type='button'>同步钱包流水</button>
+              <button id='sync-button' class='button sync-action' type='button'>同步收益</button>
             </div>
             <div id='sync-results' aria-live='polite'>
               <p>尚未同步。</p>

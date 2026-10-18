@@ -79,7 +79,8 @@ def test_readme_contains_machine_operational_setup_contract():
     assert "EVE Developers Portal" in readme
     assert "Authentication & API Access" in readme
     assert set(re.findall(r"esi-[a-z0-9._]+", readme)) == {
-        "esi-wallet.read_character_wallet.v1"
+        "esi-wallet.read_character_wallet.v1",
+        "esi-corporations.read_projects.v1",
     }
 
 
@@ -88,7 +89,7 @@ def test_readme_contains_machine_operational_setup_contract():
     [
         ("添加角色", "每个角色", "分别", "合计"),
         ("首次授权", "精确时刻", "之前", "丢弃", "重新授权"),
-        ("北京时间", "Asia/Shanghai", "366", "同步钱包流水", "停用"),
+        ("北京时间", "Asia/Shanghai", "366", "同步收益", "停用"),
         ("127.0.0.1", "HTTPS", "Secure", "只读", "Client Secret"),
         ("备份", "APP_ENCRYPTION_KEY", "丢失", "真实登录", "自己的"),
     ],
@@ -402,7 +403,7 @@ def test_windows_release_checklist_covers_desktop_acceptance_contract():
         "桌面快捷方式",
         "重复启动",
         "授权",
-        "同步钱包流水",
+        "同步收益",
         "关闭并重新打开",
         "覆盖升级",
         "旧版 v2",

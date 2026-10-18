@@ -192,7 +192,7 @@ function renderLedger(direction = 0) {
     const visible = visibleLedgerDays(ledgerDays, month, beijingDate(), ledgerExpanded);
     rows($('daily-table').tBodies[0], visible, [
       { key: 'date' }, { key: 'income', money: true }, { key: 'tax', money: true },
-      { key: 'net', money: true }, { format: () => '—' },
+      { key: 'net', money: true }, { format: (item) => lpReading(item.lp) },
     ]);
     $('ledger-month-label').textContent = `${month.slice(0, 4)} 年 ${Number(month.slice(5))} 月`;
     const caption = ledgerExpanded ? '整月明细 · 北京时间' : `最近 ${visible.length} 天明细 · 展开可查看整月`;
@@ -227,6 +227,28 @@ function isk(value, fractionDigits = 2) {
   const digits = whole.replace('-', '');
   const fraction = rawFraction.padEnd(fractionDigits, '0').slice(0, fractionDigits);
   return `${sign}${digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${fractionDigits ? `.${fraction}` : ''} ISK`;
+}
+
+function lp(value, places = 2) {
+  const [whole, rawFraction = ''] = String(value).split('.');
+  const fraction = rawFraction.slice(0, places).replace(/0+$/, '');
+  return whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fraction ? `.${fraction}` : '');
+}
+
+function lpReading(data) {
+  return data?.has_coverage ? `${lp(data.net)} LP` : '— LP';
+}
+
+function lpNote(data) {
+  const notes = ['按同步日统计，扣除 5%'];
+  if (data?.started_at) {
+    notes.push('起算：' + new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short',
+    }).format(new Date(data.started_at)));
+  }
+  if (!data?.complete) notes.push('统计不完整');
+  (data?.warnings || []).forEach(warning => notes.push(warning.message));
+  return notes.join('；');
 }
 
 function cell(value) {
@@ -345,7 +367,7 @@ function rows(target, items, columns) {
   });
 }
 
-function breakdown(target, title, items, label) {
+function breakdown(target, title, items, label, summaryLp = null) {
   target.replaceChildren();
   const marker = document.createElement('span');
   marker.className = 'section-index';
@@ -371,7 +393,7 @@ function breakdown(target, title, items, label) {
     if (label === 'name') {
       const lp = document.createElement('span');
       lp.className = 'lp-placeholder';
-      lp.textContent = 'LP 收入 —';
+      lp.textContent = `C 海军 ${lpReading(item.lp)}`;
       line.append(lp);
     }
     target.append(line);
@@ -380,9 +402,9 @@ function breakdown(target, title, items, label) {
     const lp = document.createElement('div');
     lp.className = 'breakdown-row lp-row';
     const name = document.createElement('span');
-    name.textContent = 'LP 收入';
+    name.textContent = 'C 海军 LP';
     const value = document.createElement('strong');
-    value.textContent = '— LP';
+    value.textContent = lpReading(summaryLp);
     lp.append(name, value);
     target.append(lp);
   }
@@ -393,7 +415,9 @@ function render(data, entries, direction = 0) {
     $('summary-income').textContent = isk(data.income, 0);
     $('summary-tax').textContent = isk(data.tax, 0);
     $('summary-net').textContent = isk(data.net, 0);
-    breakdown($('category-breakdown'), '类型分项', data.categories, 'category');
+    $('summary-lp').textContent = lpReading(data.lp);
+    $('lp-note').textContent = lpNote(data.lp);
+    breakdown($('category-breakdown'), '类型分项', data.categories, 'category', data.lp);
     breakdown($('character-breakdown'), '角色分项', data.characters, 'name');
   }, direction);
   const details = $('entry-details');
@@ -490,8 +514,12 @@ async function load() {
 }
 
 function roleStatus(character) {
-  if (character.authorization_required) return '需重新授权';
-  return character.last_synced_at ? `上次同步：${character.last_synced_at}` : '未同步';
+  const wallet = character.authorization_required ? '钱包需重新授权'
+    : (character.last_synced_at ? `钱包上次同步：${character.last_synced_at}` : '钱包未同步');
+  const status = character.lp;
+  const loyalty = status?.error?.message || (status?.status === 'ok' ? 'LP 已同步'
+    : status?.status === 'authorization_required' ? 'LP 待授权' : 'LP 尚未建立基线');
+  return `${wallet}；${loyalty}`;
 }
 
 async function setEnabled(characterId, enabled, button) {
@@ -763,6 +791,13 @@ function renderSyncResults(results) {
     const item = document.createElement('li');
     const outcome = result.error ? `失败：${result.error.message}` : '成功';
     item.textContent = `${role ? role.name : '角色'} (${result.character_id})：${outcome}；新增 ${result.new_count} 条；完成于 ${result.completed_at}`;
+    if (result.lp) {
+      const loyalty = result.lp;
+      const lpOutcome = loyalty.error?.message || (loyalty.baseline_created
+        ? 'LP 基线已建立' : `LP 新增 ${lp(loyalty.net)} LP`);
+      const warnings = (loyalty.warnings || []).map(warning => warning.message).join('；');
+      item.textContent += `；${lpOutcome}${warnings ? '；' + warnings : ''}`;
+    }
     list.append(item);
   });
   region.append(list);

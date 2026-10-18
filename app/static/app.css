@@ -138,9 +138,9 @@ button:hover:not(:disabled), .button:hover { border-color: #9fbeaa; background: 
 .secondary-readings article + article { border-top: 1px solid var(--rule); }
 .secondary-readings .tax-reading strong { color: var(--amber); font-size: clamp(1.25rem, 2vw, 1.65rem); }
 .lp-reading { display: flex; flex-direction: column; justify-content: center; padding: 26px; background: var(--blue); border-color: #d6e4e8; }
-.lp-reading strong { font-size: 2.6rem; color: #426e7c; }
+.lp-reading strong { font-size: clamp(1.35rem, 2.5vw, 2.4rem); color: #426e7c; }
 .lp-reading strong small { font-size: var(--text-sm); letter-spacing: 0; font-weight: 500; }
-.lp-note { margin-top: 18px; }
+.lp-note { margin-top: 18px; line-height: 1.65; overflow-wrap: anywhere; }
 .panel { min-width: 0; border: 1px solid var(--rule); border-radius: 20px; padding: 26px; background: var(--surface); box-shadow: var(--shadow); }
 .panel-heading { display: flex; gap: 16px; align-items: center; justify-content: space-between; margin-bottom: 20px; }
 .panel-heading > p { margin-bottom: 0; color: var(--muted); font-size: var(--text-xs); }
