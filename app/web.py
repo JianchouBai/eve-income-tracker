@@ -31,6 +31,7 @@ from app.data_location_controller import DataLocationController, DataLocationErr
 from app.desktop_control import DesktopControl
 from app.desktop_session import DesktopLaunchTokenStore, DesktopSessionError
 from app.esi import EsiError
+from app.lp_storage import LpRepository
 from app.models import CharacterGroupRecord, CharacterRecord
 from app.reporting import BEIJING, build_dashboard, classify_entry, parse_date_range
 from app.security import TokenCipher
@@ -88,6 +89,58 @@ SYNC_MESSAGES = {
     "invalid_configuration": "请先完成应用配置。",
 }
 
+LP_MESSAGES = {
+    "lp_scope_required": "LP 待授权，请为此角色追加军团项目读取权限。",
+    "project_permission_denied": "无法读取军团项目，已保留 LP 历史。",
+    "project_not_found": "未找到 LP 对账项目。",
+    "project_ambiguous": "找到多个同名项目，无法确定统计来源。",
+    "project_type_mismatch": "项目类型不是获取忠诚点。",
+    "project_source_mismatch": "项目未限定 C 海军 LP。",
+    "project_multiplier_unsupported": "项目贡献单位不受支持。",
+    "reading_decreased": "LP 读数异常，已保留上次记录。",
+    "tail_unavailable": "旧项目尾账无法读取，统计存在缺口。",
+    "configuration_gap": "项目配置变更后已重新建立基线，统计存在缺口。",
+    "project_limit_reached": "LP 项目或个人贡献已达上限，可能停止记录。",
+    "project_stopped": "LP 项目已结束，可能停止记录。",
+    "invalid_data": "LP 数据无效，已保留原有记录。",
+    "invalid_pages": "无法完整读取 LP 项目列表。",
+    "not_found": "LP 项目不可用，已保留原有记录。",
+    "request_failed": "无法读取 LP 数据，请稍后重试。",
+    "authorization_failed": "角色授权已失效，请重新授权。",
+    "lp_sync_failed": "LP 同步失败，已保留原有记录。",
+}
+
+
+def _lp_error(code):
+    if code not in LP_MESSAGES:
+        code = "lp_sync_failed"
+    return {"code": code, "message": LP_MESSAGES[code]}
+
+
+def _lp_sync_payload(result):
+    if result is None:
+        return None
+    return {
+        "status": result.status
+        if result.status
+        in {
+            "ok",
+            "baseline",
+            "failed",
+            "unavailable",
+            "anomaly",
+            "authorization_required",
+        }
+        else "failed",
+        "completed_at": result.completed_at.isoformat(),
+        "baseline_created": result.baseline_created,
+        "gross": _decimal(result.amounts.gross),
+        "deduction": _decimal(result.amounts.deduction),
+        "net": _decimal(result.amounts.net),
+        "error": _lp_error(result.error_code) if result.error_code else None,
+        "warnings": [_lp_error(code) for code in result.warnings],
+    }
+
 
 def _is_persisted_id(value: int) -> bool:
     return 1 <= value <= SQLITE_MAX_INTEGER
@@ -138,6 +191,7 @@ class AppServices:
     cipher: TokenCipher | None
     sso: SsoClient | None
     sync: SyncService | None
+    lp: LpRepository | None = None
 
 
 @dataclass
@@ -677,15 +731,21 @@ def create_app(
                 502,
                 "EVE 授权验证失败，请重试。",
             )
+        result = None
         try:
             authorized_at = clock.now_utc()
-            services.characters.upsert_authorization(
-                identity.character_id,
-                identity.character_name,
-                services.cipher.encrypt(tokens.refresh_token),
-                authorized_at,
-                granted_scopes=identity.scopes,
-            )
+            if services.sync is not None:
+                result = await services.sync.save_authorization_and_sync(
+                    identity, tokens, authorized_at
+                )
+            else:
+                services.characters.upsert_authorization(
+                    identity.character_id,
+                    identity.character_name,
+                    services.cipher.encrypt(tokens.refresh_token),
+                    authorized_at,
+                    granted_scopes=identity.scopes,
+                )
         except Exception:  # noqa: BLE001 - expose only a fixed save failure.
             logger.warning(
                 "EVE authorization failed: stage=credential_save code=unexpected_error"
@@ -696,17 +756,11 @@ def create_app(
                 "无法保存 EVE 授权，请重试。",
             )
 
-        target = "/"
-        if services.sync is not None:
-            try:
-                result = await services.sync.sync_character(
-                    identity.character_id,
-                    initial_access_token=tokens.access_token,
-                )
-                if result.status != "ok":
-                    target = "/?status=sync_failed"
-            except Exception:  # noqa: BLE001 - authorization remains saved on sync failure.
-                target = "/?status=sync_failed"
+        target = (
+            "/?status=sync_failed"
+            if result is not None and result.status != "ok"
+            else "/"
+        )
 
         runtime.attempts.succeed(claimed.attempt_id)
         if runtime.mode == "desktop":
@@ -953,6 +1007,7 @@ def create_app(
                     "new_count": row.new_count,
                     "completed_at": row.completed_at.isoformat(),
                     "status": "ok" if row.status == "ok" else "failed",
+                    "lp": _lp_sync_payload(row.lp),
                     "error": None
                     if row.status == "ok"
                     else _sync_error(row.error_code),

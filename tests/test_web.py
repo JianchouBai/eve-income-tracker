@@ -86,6 +86,21 @@ class FakeSync:
         self.fail = False
         self.results = ()
 
+    async def save_authorization_and_sync(self, identity, tokens, authorized_at):
+        self.characters.upsert_authorization(
+            identity.character_id,
+            identity.character_name,
+            self.cipher.encrypt(tokens.refresh_token),
+            authorized_at,
+            granted_scopes=identity.scopes,
+        )
+        try:
+            return await self.sync_character(identity.character_id, tokens.access_token)
+        except RuntimeError:
+            return SyncResult(
+                identity.character_id, 0, self.clock.now_utc(), "failed", "sync_failed"
+            )
+
     async def sync_character(self, character_id, initial_access_token=None):
         self.calls.append((character_id, initial_access_token))
         self.clock.current += timedelta(minutes=1)
@@ -122,6 +137,8 @@ def context(tmp_path):
         FakeSso(clock),
         FakeSync(clock),
     )
+    services.sync.characters = services.characters
+    services.sync.cipher = services.cipher
     return settings, services, clock
 
 
@@ -1995,3 +2012,52 @@ def test_callback_stores_verified_scopes(context):
         start = record.tracking_started_at
         authorize(client, settings)
         assert services.characters.list_all()[0].tracking_started_at == start
+
+
+def test_sync_reports_lp_status_separately_and_sanitizes_unknown_codes(context):
+    from app.lp_models import LpSyncResult
+
+    settings, services, clock = context
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        group = services.groups.create("LP", clock.now_utc())
+        services.sync.results = (
+            SyncResult(
+                101,
+                1,
+                clock.now_utc(),
+                "ok",
+                None,
+                LpSyncResult(
+                    101,
+                    "authorization_required",
+                    clock.now_utc(),
+                    error_code="lp_scope_required",
+                ),
+            ),
+        )
+        response = client.post(
+            f"/api/sync?group_id={group.group_id}",
+            headers=csrf_headers(client, settings),
+        )
+        row = response.json()["results"][0]
+        assert row["status"] == "ok"
+        assert row["lp"]["error"]["code"] == "lp_scope_required"
+        assert row["lp"]["net"] == "0"
+        services.sync.results = (
+            SyncResult(
+                101,
+                1,
+                clock.now_utc(),
+                "ok",
+                None,
+                LpSyncResult(
+                    101, "failed", clock.now_utc(), error_code="private-secret"
+                ),
+            ),
+        )
+        response = client.post(
+            f"/api/sync?group_id={group.group_id}",
+            headers=csrf_headers(client, settings),
+        )
+        assert "private-secret" not in response.text

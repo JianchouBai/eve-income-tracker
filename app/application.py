@@ -5,6 +5,8 @@ from fastapi import FastAPI
 
 from app.config import PROJECT_ROOT, Settings
 from app.esi import EsiClient
+from app.lp_storage import LpRepository
+from app.lp_sync import LpSyncService
 from app.security import TokenCipher
 from app.sso import SsoClient
 from app.storage import (
@@ -30,6 +32,7 @@ def build_app(
     groups = CharacterGroupRepository(database)
     journal = JournalRepository(database)
     services = AppServices(characters, groups, journal, None, None, None)
+    services.lp = LpRepository(database)
     http = None
     if not settings.configuration_issues():
         http = httpx.AsyncClient()
@@ -37,8 +40,15 @@ def build_app(
         sso = SsoClient(settings, http, clock.now_utc)
         services.cipher = cipher
         services.sso = sso
+        esi = EsiClient(settings, http)
         services.sync = SyncService(
-            characters, journal, cipher, sso, EsiClient(settings, http), clock.now_utc
+            characters,
+            journal,
+            cipher,
+            sso,
+            esi,
+            clock.now_utc,
+            lp=LpSyncService(services.lp, esi, clock.now_utc),
         )
     application = create_app(settings, services, clock, runtime)
     storage_lifespan = application.router.lifespan_context

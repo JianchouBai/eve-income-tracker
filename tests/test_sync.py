@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet
 from app.esi import EsiAuthorizationError, EsiDataError
 from app.models import JournalEntry
 from app.security import TokenCipher
-from app.sso import SsoError, TokenSet
+from app.sso import WALLET_SCOPE, CharacterIdentity, SsoError, TokenSet
 from app.storage import (
     CharacterGroupRepository,
     CharacterRepository,
@@ -35,9 +35,15 @@ class FakeSso:
     def __init__(self, refresh_token: str = "rotated-refresh-token"):
         self.refresh_token = refresh_token
         self.calls = []
+        self.character_id = 1
+
+    async def verify_access_token(self, token):
+        return CharacterIdentity(self.character_id, "Pilot", (WALLET_SCOPE,))
 
     async def refresh(self, refresh_token: str) -> TokenSet:
         self.calls.append(refresh_token)
+        if refresh_token.startswith("refresh-") and refresh_token[8:].isdigit():
+            self.character_id = int(refresh_token[8:])
         return TokenSet("access-token", self.refresh_token, NOW)
 
 
