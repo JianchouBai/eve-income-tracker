@@ -426,6 +426,28 @@ def test_verified_identity_accepts_exact_single_scope_string(signing_keys, jwt_c
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("claim", ["iat", "nbf"])
+@pytest.mark.parametrize("seconds_ahead", [1, 30])
+def test_verified_identity_accepts_small_issuer_clock_skew(
+    signing_keys, jwt_clock, claim, seconds_ahead
+):
+    async def scenario():
+        token = jwt.encode(
+            claims(**{claim: 1893456000 + seconds_ahead}),
+            signing_keys[0],
+            algorithm="RS256",
+            headers={"kid": "selected-key"},
+        )
+        async with httpx.AsyncClient(transport=jwt_transport(signing_keys, [])) as http:
+            identity = await SsoClient(settings(), http, jwt_clock).verify_access_token(
+                token
+            )
+        assert identity.character_id == 2112345678
+        assert identity.scopes == (WALLET_SCOPE,)
+
+    asyncio.run(scenario())
+
+
 def test_es256_token_reports_unsupported_transition_without_disclosing_token(
     jwt_clock, caplog
 ):
@@ -464,7 +486,8 @@ def test_es256_token_reports_unsupported_transition_without_disclosing_token(
         ({"exp": 1893455999}, "expired_token"),
         ({"exp": None}, "missing_required_claim"),
         ({"exp": "not-a-time"}, "invalid_standard_claims"),
-        ({"iat": 1893456001}, "immature_token"),
+        ({"iat": 1893456031}, "immature_token"),
+        ({"nbf": 1893456031}, "immature_token"),
         ({"scp": []}, "wallet_scope_not_granted"),
         ({"scp": ["other-scope"]}, "wallet_scope_not_granted"),
         ({"scp": None}, "missing_required_claim"),

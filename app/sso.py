@@ -17,6 +17,7 @@ WALLET_SCOPE = "esi-wallet.read_character_wallet.v1"
 PROJECTS_SCOPE = "esi-corporations.read_projects.v1"
 REQUESTED_SCOPES = (WALLET_SCOPE, PROJECTS_SCOPE)
 CACHE_LIFETIME = timedelta(hours=1)
+TOKEN_CLOCK_SKEW_SECONDS = 30
 
 
 class SsoError(Exception):
@@ -194,6 +195,7 @@ class SsoClient:
                 access_token,
                 public_key,
                 algorithms=["RS256"],
+                leeway=TOKEN_CLOCK_SKEW_SECONDS,
                 issuer=[
                     "https://login.eveonline.com/",
                     "https://login.eveonline.com",
@@ -204,6 +206,10 @@ class SsoClient:
                     "require": ["exp", "iss", "aud", "scp", "sub", "name"],
                 },
             )
+            # Allow small issuer clock skew for iat/nbf, while preserving the
+            # existing strict expiry boundary rather than extending token life.
+            if int(claims["exp"]) <= self._clock().timestamp():
+                raise jwt.ExpiredSignatureError
         except jwt.InvalidSignatureError:
             raise SsoError(
                 "invalid_signature", "EVE SSO token verification failed."

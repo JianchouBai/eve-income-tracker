@@ -6,7 +6,7 @@
 
 ### 安装与启动
 
-从项目的 GitHub Releases 下载对应版本的 `EVE-Income-Tracker-<版本>-x64-Setup.exe`，当前应用版本为 **2.1.0**。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
+从项目的 GitHub Releases 下载对应版本的 `EVE-Income-Tracker-<版本>-x64-Setup.exe`，当前应用版本为 **2.1.1**。每次发布都由维护者手动创建 GitHub Release；应用目前不自动更新。发布页应同时给出安装包的 SHA-256，下载后可用 `Get-FileHash` 核对。
 
 安装包按当前 Windows 用户安装，不要求管理员权限，并创建开始菜单和桌面快捷方式。安装完成后直接双击 **EVE Income Tracker**：无需安装 Python，也无需打开终端。程序自带应用代码和页面资源；若电脑缺少 Microsoft Edge WebView2 Runtime，安装程序会调用微软官方引导程序安装它。
 
@@ -100,6 +100,8 @@ EVE 应用申请两个只读权限：`esi-wallet.read_character_wallet.v1` 用�
 
 重复启动只会提示应用已经运行，不会启动第二个本地服务。端口 8000 被占用、WebView2 缺失、数据库不可写或迁移失败时，应用会显示固定的中文错误；详细诊断记录在本机 `logs` 目录。不要通过删除数据库来修复启动问题，应先保留数据库、日志和备份。
 
+授权日志中的 `immature_token` 表示令牌的签发时间或生效时间晚于本机当前时间。v2.1.1 为这两个时间提供最多 30 秒的时钟偏差容差，仍严格拒绝已过期令牌，并保留签名、发行方、受众和权限校验。超出容差时，浏览器与程序会提示在 Windows“设置 → 时间和语言 → 日期和时间”中同步时间后重新授权；无需清空数据库或重置本机授权。
+
 发布维护者应在发布前逐项执行 [Windows 发布验收清单](docs/windows-release-checklist.md)。
 
 ## 开发与维护
@@ -183,7 +185,7 @@ notepad .env
 {
   "eve_client_id": "你的公开 Client ID",
   "eve_callback_url": "http://localhost:8000/auth/callback",
-  "eve_user_agent": "eve-income-tracker/2.1.0 (your-valid-email@example.com)",
+  "eve_user_agent": "eve-income-tracker/2.1.1 (your-valid-email@example.com)",
   "esi_compatibility_date": "2026-05-19"
 }
 ```

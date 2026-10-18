@@ -580,6 +580,44 @@ def test_callback_logs_new_claim_category_without_sensitive_values(
     assert "private-" not in caplog.text
 
 
+def test_immature_token_guides_clock_sync_in_development_callback(context):
+    settings, services, clock = context
+    services.sso.failure = "verify:immature_token"
+    with TestClient(create_app(settings, services, clock)) as client:
+        response = authorize(client, settings)
+        assert response.status_code == 502
+        assert "同步时间" in response.json()["error"]["message"]
+        assert "private-" not in response.text
+        assert services.characters.list_all() == []
+
+
+def test_immature_token_guides_clock_sync_in_browser_and_desktop_status(context):
+    settings, services, clock = context
+    settings.runtime_mode = "desktop"
+    services.sso.failure = "verify:immature_token"
+    runtime = desktop_runtime(clock)
+    app = create_app(settings, services, clock, runtime)
+    with TestClient(app) as desktop:
+        launch_desktop(desktop, settings, runtime)
+        started = desktop.post(
+            "/api/authorization-attempts", headers=csrf_headers(desktop, settings)
+        ).json()
+        state = parse_qs(urlsplit(started["authorization_url"]).query)["state"][0]
+        with TestClient(app) as browser:
+            callback = browser.get(
+                "/auth/callback", params={"code": "private-code", "state": state}
+            )
+        assert callback.status_code == 200
+        assert "同步时间" in callback.text
+        status = desktop.get(
+            f"/api/authorization-attempts/{started['attempt_id']}"
+        ).json()
+        assert status["status"] == "failed"
+        assert "同步时间" in status["message"]
+        assert "private-" not in callback.text
+        assert services.characters.list_all() == []
+
+
 def test_callback_sync_failure_preserves_character_and_redirects_with_safe_status(
     context,
 ):

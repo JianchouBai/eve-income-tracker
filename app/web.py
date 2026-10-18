@@ -52,6 +52,10 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 logger = logging.getLogger(__name__)
 SQLITE_MAX_INTEGER = 2**63 - 1
 _EPHEMERAL_SESSION_SECRET = secrets.token_urlsafe(48)
+CLOCK_SYNC_MESSAGE = (
+    "EVE 授权令牌尚未生效，请在 Windows“设置 → 时间和语言 → 日期和时间”"
+    "中同步时间后重新授权。"
+)
 SAFE_SSO_ERROR_CODES = frozenset(
     {
         "expired_token",
@@ -691,16 +695,28 @@ def create_app(
             raise WebError(
                 404, "attempt_not_found", "授权请求不存在或已过期。"
             ) from None
-        message = "授权未完成，请重试。" if status.status == "failed" else None
+        message = None
+        if status.status == "failed":
+            message = (
+                CLOCK_SYNC_MESSAGE
+                if status.error_code == "clock_out_of_sync"
+                else "授权未完成，请重试。"
+            )
         return {"status": status.status, "message": message}
 
-    def desktop_callback_page(succeeded: bool) -> HTMLResponse:
+    def desktop_callback_page(
+        succeeded: bool, *, clock_error: bool = False
+    ) -> HTMLResponse:
         if succeeded:
             title = "EVE 授权已完成"
             detail = "授权已安全完成，可以关闭此页面并返回应用。"
         else:
             title = "EVE 授权未完成"
-            detail = "授权未完成，请关闭此页面并返回应用重试。"
+            detail = (
+                CLOCK_SYNC_MESSAGE
+                if clock_error
+                else "授权未完成，请关闭此页面并返回应用重试。"
+            )
         document = (
             "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -743,7 +759,9 @@ def create_app(
         def callback_failure(error_code: str, status: int, message: str):
             runtime.attempts.fail(claimed.attempt_id, error_code)
             if runtime.mode == "desktop":
-                return desktop_callback_page(False)
+                return desktop_callback_page(
+                    False, clock_error=error_code == "clock_out_of_sync"
+                )
             raise WebError(status, "authorization_failed", message)
 
         if issues or services.sso is None or services.cipher is None:
@@ -774,6 +792,8 @@ def create_app(
             identity = await services.sso.verify_access_token(tokens.access_token)
         except Exception as error:  # noqa: BLE001 - log only safe diagnostics.
             _log_authorization_failure("token_verification", error)
+            if isinstance(error, SsoError) and error.code == "immature_token":
+                return callback_failure("clock_out_of_sync", 502, CLOCK_SYNC_MESSAGE)
             return callback_failure(
                 "token_verification_failed",
                 502,
