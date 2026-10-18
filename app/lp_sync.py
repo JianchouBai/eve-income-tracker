@@ -113,6 +113,46 @@ class LpSyncService:
             warnings.append("project_stopped")
         return replace(result, warnings=tuple(warnings))
 
+    def _record_tail_problem(self, character_id, old, project=None, *, code=None):
+        corporation_id = old.corporation_id if old else project.corporation_id
+        project_id = old.project_id if old else project.project_id
+        if code in CONFIGURATION_ERRORS:
+            self.repository.record_problem(
+                character_id,
+                code,
+                self.clock(),
+                corporation_id=corporation_id,
+                project_id=project_id,
+            )
+        # Unreadable tails stay pending. A later valid cumulative reading can
+        # reconstruct them, including after a temporary 403 or 404.
+        self.repository.record_problem(
+            character_id,
+            "tail_unavailable",
+            old.last_success_at if old else self.clock(),
+            corporation_id=corporation_id,
+            project_id=project_id,
+        )
+
+    async def _settle_tail(self, character_id, token, old, project=None):
+        try:
+            if project is None:
+                project = await self.esi.fetch_project(
+                    token, old.corporation_id, old.project_id
+                )
+            result = await self._capture(character_id, token, project, final=True)
+            if result.status != "anomaly":
+                return result
+            self._record_tail_problem(character_id, old, project)
+        except EsiAuthorizationError:
+            raise
+        except (EsiError, LpProjectSelectionError) as error:
+            self._record_tail_problem(character_id, old, project, code=error.code)
+            result = LpSyncResult(
+                character_id, "unavailable", self.clock(), error_code=error.code
+            )
+        return replace(result, warnings=("tail_unavailable",))
+
     async def sync_character(
         self, character_id: int, access_token: str, scopes: tuple[str, ...]
     ) -> LpSyncResult:
@@ -141,27 +181,9 @@ class LpSyncService:
                     == (corporation_id, selected.project_id)
                 ):
                     continue
-                try:
-                    old_project = await self.esi.fetch_project(
-                        access_token, old.corporation_id, old.project_id
-                    )
-                    tail = await self._capture(
-                        character_id, access_token, old_project, final=True
-                    )
-                    amounts = self._add(amounts, tail.amounts)
-                    if tail.status == "anomaly":
-                        warnings.append("tail_unavailable")
-                except EsiAuthorizationError:
-                    raise
-                except (EsiError, LpProjectSelectionError):
-                    self.repository.record_problem(
-                        character_id,
-                        "tail_unavailable",
-                        old.last_success_at,
-                        corporation_id=old.corporation_id,
-                        project_id=old.project_id,
-                        irrecoverable=True,
-                    )
+                tail = await self._settle_tail(character_id, access_token, old)
+                amounts = self._add(amounts, tail.amounts)
+                if tail.status in {"unavailable", "anomaly"}:
                     warnings.append("tail_unavailable")
             if selected is not None:
                 try:
@@ -179,29 +201,27 @@ class LpSyncService:
                         None,
                     )
                     if old:
-                        self.repository.record_problem(
-                            character_id,
-                            "tail_unavailable",
-                            old.last_success_at,
-                            corporation_id=corporation_id,
-                            project_id=selected.project_id,
-                            irrecoverable=True,
-                        )
+                        self._record_tail_problem(character_id, old)
                         warnings.append("tail_unavailable")
                     selected = None
             if selected is None:
                 selected = await self._discover(access_token, corporation_id)
                 self.repository.select_project(selected, self.clock())
-            result = await self._capture(
-                character_id,
-                access_token,
-                selected,
-                final=selected.state in TERMINAL_STATES,
-            )
-            amounts = self._add(amounts, result.amounts)
-            if result.status == "anomaly":
-                return replace(result, amounts=amounts, warnings=tuple(warnings))
             if selected.state in TERMINAL_STATES:
+                old = next(
+                    (
+                        t for t in tracking
+                        if (t.corporation_id, t.project_id)
+                        == (selected.corporation_id, selected.project_id)
+                    ),
+                    None,
+                )
+                result = await self._settle_tail(
+                    character_id, access_token, old, selected
+                )
+                amounts = self._add(amounts, result.amounts)
+                if result.status in {"unavailable", "anomaly"}:
+                    warnings.append("tail_unavailable")
                 try:
                     new_project = await self._discover(
                         access_token, corporation_id, active_only=True
@@ -217,7 +237,17 @@ class LpSyncService:
                             character_id, access_token, selected
                         )
                         amounts = self._add(amounts, result.amounts)
+            else:
+                result = await self._capture(character_id, access_token, selected)
+                amounts = self._add(amounts, result.amounts)
+            if result.status in {"unavailable", "anomaly"}:
+                return replace(
+                    result, amounts=amounts, warnings=tuple(dict.fromkeys(warnings))
+                )
             self.repository.resolve_problems(character_id, result.completed_at)
+            self.repository.resolve_problems(
+                character_id, result.completed_at, corporation_id=corporation_id
+            )
             for code in result.warnings:
                 self.repository.record_problem(
                     character_id,

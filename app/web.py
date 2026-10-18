@@ -966,7 +966,20 @@ def create_app(
         lp_history = services.lp.report_history(
             selected, period.start_utc, period.end_utc_exclusive
         )
-        lp_report = build_lp_report(lp_history, selected, period)
+        lp_report = build_lp_report(
+            lp_history,
+            selected,
+            period,
+            current_warnings={
+                record.character_id: ("lp_scope_required",)
+                for record in records
+                if record.character_id in selected
+                and (
+                    record.authorization_required
+                    or PROJECTS_SCOPE not in record.granted_scopes
+                )
+            },
+        )
         return {
             "group_id": group.group_id,
             "group_name": group.name,

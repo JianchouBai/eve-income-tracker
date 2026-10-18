@@ -192,12 +192,14 @@ function renderLedger(direction = 0) {
     const visible = visibleLedgerDays(ledgerDays, month, beijingDate(), ledgerExpanded);
     rows($('daily-table').tBodies[0], visible, [
       { key: 'date' }, { key: 'income', money: true }, { key: 'tax', money: true },
-      { key: 'net', money: true }, { format: (item) => lpReading(item.lp) },
+      { key: 'net', money: true }, { format: (item) => lpReading(item.lp)
+        + (item.lp?.complete === false ? ' · 统计不完整' : '') },
     ]);
     $('ledger-month-label').textContent = `${month.slice(0, 4)} 年 ${Number(month.slice(5))} 月`;
     const caption = ledgerExpanded ? '整月明细 · 北京时间' : `最近 ${visible.length} 天明细 · 展开可查看整月`;
     $('ledger-caption').textContent = caption + (displayedLedger ? ` · ${reportScope(displayedLedger)}` : '');
     $('ledger-caption').setAttribute('title', displayedLedger?.characterNames.join('、') || '默认启用角色');
+    $('ledger-lp-note').textContent = lpNote(displayedLedger?.lp);
     $('ledger-toggle').textContent = ledgerExpanded ? '收起明细' : '展开整月';
     $('ledger-toggle').setAttribute('aria-expanded', String(ledgerExpanded));
     $('ledger-next').disabled = ledgerMonth >= beijingDate().slice(0, 7);
@@ -491,7 +493,7 @@ async function loadLedger() {
     if (generation !== ledgerRequestGeneration || requestedGroupId !== selectedGroupId || requestedMonth !== ledgerMonth) return;
     ledgerDays = data.daily;
     if (displayedLedger?.from.slice(0, 7) !== requestedMonth) ledgerExpanded = false;
-    displayedLedger = context;
+    displayedLedger = {...context, lp: data.lp};
     renderLedger(direction);
     $('daily-table').hidden = false;
     $('ledger-toggle').disabled = false;

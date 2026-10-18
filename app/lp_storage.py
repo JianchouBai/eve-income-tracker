@@ -154,11 +154,19 @@ class LpRepository:
                 db, character_id, code, at, corporation_id, project_id, irrecoverable
             )
 
-    def resolve_problems(self, character_id: int, at: datetime) -> None:
+    def resolve_problems(
+        self,
+        character_id: int,
+        at: datetime,
+        *,
+        corporation_id: int | None = None,
+        project_id: str | None = None,
+    ) -> None:
         with self.database.connection() as db:
             db.execute(
-                "UPDATE lp_problems SET ended_at=? WHERE character_id=? AND ended_at IS NULL",
-                (_utc_iso(at), character_id),
+                "UPDATE lp_problems SET ended_at=? WHERE character_id=? "
+                "AND corporation_id IS ? AND project_id IS ? AND ended_at IS NULL",
+                (_utc_iso(at), character_id, corporation_id, project_id),
             )
 
     def commit_observation(
@@ -197,8 +205,10 @@ class LpRepository:
                         True,
                     )
                     db.execute(
-                        "UPDATE lp_problems SET ended_at=? WHERE character_id=? AND ended_at IS NULL AND code='configuration_gap'",
-                        (at, o.character_id),
+                        "UPDATE lp_problems SET ended_at=? WHERE character_id=? "
+                        "AND corporation_id=? AND project_id=? "
+                        "AND ended_at IS NULL AND code='configuration_gap'",
+                        (at, *key),
                     )
                 segment = db.execute(
                     "INSERT INTO lp_segments(character_id, corporation_id, project_id, started_at, reason) VALUES(?,?,?,?,?)",
@@ -267,6 +277,13 @@ class LpRepository:
                     at,
                     int(tail_settled),
                 ),
+            )
+            # Source recovery belongs to the same transaction as its accepted
+            # reading; a crash must not leave a stale configuration pause.
+            db.execute(
+                "UPDATE lp_problems SET ended_at=? WHERE character_id=? "
+                "AND corporation_id=? AND project_id=? AND ended_at IS NULL",
+                (at, *key),
             )
         return LpSyncResult(
             o.character_id,

@@ -2101,3 +2101,37 @@ def test_dashboard_lp_uses_same_role_selection_and_keeps_isk_fields(context):
         assert selected["lp"]["net"] == "190"
         assert selected["characters"][0]["lp"]["net"] == "190"
         assert "granted_scopes" not in client.get("/api/characters").text
+
+
+@pytest.mark.parametrize("loss", ["authorization_reset", "missing_scope"])
+def test_dashboard_immediately_marks_current_lp_authorization_loss(context, tmp_path, loss):
+    from test_lp_storage import T0, T1, project
+
+    from app.database_lifecycle import DatabaseLifecycle
+    from app.lp_models import LpContribution, LpObservation
+    from app.sso import REQUESTED_SCOPES, WALLET_SCOPE
+
+    settings, services, clock = context
+    clock.current = T1
+    services.sso.identity = CharacterIdentity(101, "Pilot", REQUESTED_SCOPES)
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        group = services.groups.create("LP", T0)
+        services.characters.set_group(101, group.group_id)
+        for at, value in [(T0, 100), (T1, 200)]:
+            services.lp.commit_observation(
+                LpObservation(101, project(), LpContribution(value), at)
+            )
+        url = f"/api/dashboard?group_id={group.group_id}&from=2026-10-18&to=2026-10-18"
+        assert client.get(url).json()["lp"]["complete"]
+        if loss == "authorization_reset":
+            DatabaseLifecycle(
+                services.characters.database, tmp_path / "backups"
+            ).reset_authorization()
+        else:
+            services.characters.replace_granted_scopes(101, (WALLET_SCOPE,))
+        report = client.get(url).json()
+        for lp in (report["lp"], report["daily"][0]["lp"], report["characters"][0]["lp"]):
+            assert lp["net"] == "95" and lp["has_coverage"]
+            assert not lp["complete"]
+            assert "lp_scope_required" in {w["code"] for w in lp["warnings"]}

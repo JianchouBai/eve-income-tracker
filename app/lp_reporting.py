@@ -50,7 +50,11 @@ def _combine(rows: list[LpReportRow]) -> LpReportRow:
 
 
 def build_lp_report(
-    history: LpHistory, selected_ids: set[int], period: DateRange
+    history: LpHistory,
+    selected_ids: set[int],
+    period: DateRange,
+    *,
+    current_warnings: dict[int, tuple[str, ...]] | None = None,
 ) -> LpReport:
     days = [
         period.start + timedelta(days=n)
@@ -87,6 +91,7 @@ def build_lp_report(
                 if p.started_at < bounds.end_utc_exclusive
                 and (p.ended_at is None or p.ended_at > bounds.start_utc)
             }
+            warnings.update((current_warnings or {}).get(cid, ()))
             amounts = _sum(
                 e.amounts
                 for e in entries

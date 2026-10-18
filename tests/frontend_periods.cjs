@@ -92,6 +92,18 @@ assert.equal(isk('-0.019'), '-0.01 ISK');
   assert(requests.every(path => path.includes('character_id=43')), 'period switch applied pending selection to only the summary');
   assert.equal(element('daily-table').children, before, 'summary refresh changed ledger');
   const normalFetch = global.fetch;
+  const knownLp = {net:'95',has_coverage:true,complete:false,
+    warnings:[{message:'旧项目尾账无法读取，统计存在缺口。'}]};
+  global.fetch = async () => ({ok:true,json:async () => ({
+    lp:knownLp,daily:[{date:'2026-10-17',income:'0',tax:'0',net:'0',lp:knownLp}],
+  })});
+  await loadLedger();
+  assert.equal(element('summary-net').textContent, summary, 'LP ledger refresh changed summary');
+  assert.match(element('daily-table').children[0].children[4].textContent, /95 LP.*统计不完整/);
+  assert.match(element('ledger-lp-note').textContent, /旧项目尾账无法读取/);
+  assert.match(element('ledger-lp-note').textContent, /统计不完整/);
+  global.fetch = normalFetch;
+  await loadLedger();
   global.fetch = async path => {
     if (path === '/api/groups') throw new Error('roles offline');
     return normalFetch(path);
