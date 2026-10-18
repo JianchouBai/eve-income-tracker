@@ -5,10 +5,12 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
+from uuid import UUID
 
 import httpx
 
 from app.config import Settings
+from app.lp_models import MAX_LP, LpContribution, LpProject, require_count
 from app.models import JournalEntry
 
 ESI_BASE_URL = "https://esi.evetech.net/latest"
@@ -27,6 +29,14 @@ class EsiDataError(EsiError):
 
 
 class EsiAuthorizationError(EsiError):
+    pass
+
+
+class EsiNotFoundError(EsiError):
+    pass
+
+
+class EsiProjectPermissionError(EsiError):
     pass
 
 
@@ -61,16 +71,35 @@ class EsiClient:
     async def _get_page(
         self, access_token: str, character_id: int, page: int
     ) -> httpx.Response:
+        return await self._get_response(
+            access_token,
+            f"{ESI_BASE_URL}/characters/{character_id}/wallet/journal/",
+            params={"page": page},
+        )
+
+    async def _get_response(
+        self,
+        access_token: str | None,
+        url: str,
+        *,
+        params: dict[str, str | int] | None = None,
+    ) -> httpx.Response:
+        if not self._settings._has_valid_user_agent():
+            raise EsiError(
+                "invalid_configuration", "ESI client configuration is invalid."
+            )
+        headers = {
+            "User-Agent": self._settings.eve_user_agent,
+            "X-Compatibility-Date": self._settings.esi_compatibility_date,
+        }
+        if access_token is not None:
+            headers["Authorization"] = f"Bearer {access_token}"
         for attempt in range(3):
             try:
                 response = await self._http.get(
-                    f"{ESI_BASE_URL}/characters/{character_id}/wallet/journal/",
-                    params={"page": page},
-                    headers={
-                        "Authorization": f"Bearer {access_token}",
-                        "User-Agent": self._settings.eve_user_agent,
-                        "X-Compatibility-Date": self._settings.esi_compatibility_date,
-                    },
+                    url,
+                    params=params,
+                    headers=headers,
                 )
             except httpx.HTTPError:
                 if attempt == 2:
@@ -79,6 +108,10 @@ class EsiClient:
                     ) from None
                 await self._sleeper(self._backoff(attempt))
                 continue
+            if response.status_code == 403 and "/projects" in url:
+                raise EsiProjectPermissionError(
+                    "project_permission_denied", "ESI project access denied."
+                )
             if response.status_code in {401, 403}:
                 raise EsiAuthorizationError(
                     "authorization_failed", "ESI authorization failed."
@@ -93,10 +126,174 @@ class EsiClient:
                     raise EsiError("request_failed", "ESI wallet request failed.")
                 await self._sleeper(self._backoff(attempt))
                 continue
-            if response.is_error:
+            if response.status_code == 404:
+                raise EsiNotFoundError("not_found", "ESI resource not found.")
+            if response.is_error or response.status_code != 200:
                 raise EsiError("request_failed", "ESI wallet request failed.")
             return response
         raise AssertionError("unreachable")
+
+    @staticmethod
+    def _lp_json(response: httpx.Response) -> dict:
+        try:
+            data = json.loads(response.content, parse_float=Decimal)
+            if not isinstance(data, dict):
+                raise TypeError
+            return data
+        except (ValueError, TypeError, UnicodeDecodeError):
+            raise EsiDataError("invalid_data", "ESI project data is invalid.") from None
+
+    @staticmethod
+    def _positive_id(value: int) -> int:
+        if type(value) is not int or not 0 < value <= MAX_LP:
+            raise EsiDataError("invalid_data", "ESI ID is invalid.")
+        return value
+
+    @staticmethod
+    def _project_id(value: str) -> str:
+        try:
+            return str(UUID(value))
+        except (ValueError, TypeError, AttributeError):
+            raise EsiDataError("invalid_data", "ESI project ID is invalid.") from None
+
+    @staticmethod
+    def _lp_time(value: str) -> datetime:
+        result = datetime.fromisoformat(value)
+        if result.tzinfo is None or result.utcoffset() is None:
+            raise ValueError("timestamp requires timezone")
+        return result.astimezone(UTC)
+
+    @staticmethod
+    def _lp_project(data: dict, corporation_id: int) -> LpProject:
+        try:
+            name, state = data["name"], data["state"]
+            if (
+                not isinstance(name, str)
+                or not name
+                or state
+                not in {
+                    "Unspecified",
+                    "Active",
+                    "Closed",
+                    "Completed",
+                    "Expired",
+                    "Deleted",
+                }
+            ):
+                raise ValueError
+            progress = data["progress"]
+            current, desired = progress["current"], progress["desired"]
+            require_count(current)
+            require_count(desired)
+            config = data.get("configuration", {})
+            kind = next(iter(config), "unknown") if len(config) == 1 else "unknown"
+            source = None
+            if kind == "earn_loyalty_point":
+                corps = config[kind].get("corporations", [])
+                source = tuple(
+                    sorted({EsiClient._positive_id(x["corporation_id"]) for x in corps})
+                )
+            contribution = data.get("contribution", {})
+            multiplier = contribution.get("submission_multiplier", 1)
+            if type(multiplier) is not int and not isinstance(multiplier, Decimal):
+                raise ValueError
+            multiplier = Decimal(multiplier)
+            if not multiplier.is_finite():
+                raise ValueError
+            limit = contribution.get("participation_limit")
+            if limit is not None:
+                require_count(limit)
+            return LpProject(
+                corporation_id,
+                data["id"],
+                name,
+                state,
+                source,
+                multiplier,
+                current,
+                desired,
+                limit,
+                kind,
+            )
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise EsiDataError("invalid_data", "ESI project data is invalid.") from None
+
+    async def fetch_character_corporation(self, character_id: int) -> int:
+        cid = self._positive_id(character_id)
+        response = await self._get_response(
+            None, f"https://esi.evetech.net/characters/{cid}"
+        )
+        try:
+            return self._positive_id(self._lp_json(response)["corporation_id"])
+        except KeyError:
+            raise EsiDataError(
+                "invalid_data", "ESI character data is invalid."
+            ) from None
+
+    async def fetch_corporation_projects(
+        self, access_token: str, corporation_id: int
+    ) -> tuple[LpProject, ...]:
+        cid = self._positive_id(corporation_id)
+        cursor, seen, projects = "0", set(), []
+        for _ in range(MAX_PAGES):
+            if cursor in seen:
+                raise EsiDataError("invalid_pages", "ESI project cursor is invalid.")
+            seen.add(cursor)
+            response = await self._get_response(
+                access_token,
+                f"https://esi.evetech.net/corporations/{cid}/projects",
+                params={"state": "All", "limit": 100, "after": cursor},
+            )
+            data = self._lp_json(response)
+            items = data.get("projects")
+            if not isinstance(items, list):
+                raise EsiDataError("invalid_data", "ESI project list is invalid.")
+            projects.extend(self._lp_project(item, cid) for item in items)
+            pagination = data.get("cursor", {})
+            if not isinstance(pagination, dict):
+                raise EsiDataError("invalid_pages", "ESI project cursor is invalid.")
+            cursor = pagination.get("after")
+            if not items or cursor is None:
+                return tuple(projects)
+            if not isinstance(cursor, str) or not cursor or len(cursor) > 4096:
+                raise EsiDataError("invalid_pages", "ESI project cursor is invalid.")
+        raise EsiDataError("invalid_pages", "ESI project page limit exceeded.")
+
+    async def fetch_project(
+        self, access_token: str, corporation_id: int, project_id: str
+    ) -> LpProject:
+        cid, pid = self._positive_id(corporation_id), self._project_id(project_id)
+        response = await self._get_response(
+            access_token, f"https://esi.evetech.net/corporations/{cid}/projects/{pid}"
+        )
+        project = self._lp_project(self._lp_json(response), cid)
+        if project.project_id != pid:
+            raise EsiDataError("invalid_data", "ESI project identity mismatch.")
+        return project
+
+    async def fetch_project_contribution(
+        self, access_token: str, corporation_id: int, project_id: str, character_id: int
+    ) -> LpContribution:
+        cid, pid, char = (
+            self._positive_id(corporation_id),
+            self._project_id(project_id),
+            self._positive_id(character_id),
+        )
+        response = await self._get_response(
+            access_token,
+            f"https://esi.evetech.net/corporations/{cid}/projects/{pid}/contribution/{char}",
+        )
+        data = self._lp_json(response)
+        try:
+            modified = data.get("last_modified")
+            return LpContribution(
+                data["contributed"],
+                self._lp_time(modified) if modified is not None else None,
+            )
+        except (ValueError, TypeError, KeyError):
+            raise EsiDataError(
+                "invalid_data", "ESI contribution data is invalid."
+            ) from None
 
     def _backoff(self, attempt: int) -> float:
         return min(60, 2**attempt + self._jitter())
