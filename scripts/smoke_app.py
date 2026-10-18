@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -55,6 +56,28 @@ def stop_child(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+@contextmanager
+def smoke_directory():
+    temporary = tempfile.TemporaryDirectory(prefix="eve-income-smoke-")
+    try:
+        yield temporary.name
+    finally:
+        # On Windows the venv launcher can exit before its child releases cwd.
+        # Wait briefly for sharing violations; persistent failures still fail.
+        for attempt in range(40):
+            try:
+                temporary.cleanup()
+                break
+            except OSError as error:
+                if (
+                    os.name != "nt"
+                    or getattr(error, "winerror", None) not in {32, 33}
+                    or attempt == 39
+                ):
+                    raise
+                time.sleep(0.05)
+
+
 def run_smoke() -> None:
     # Never mistake an existing server for this smoke run or stop its owner.
     with socket.socket() as reservation:
@@ -67,7 +90,7 @@ def run_smoke() -> None:
                 "127.0.0.1:8765 is unavailable; no process was stopped."
             ) from None
 
-    with tempfile.TemporaryDirectory(prefix="eve-income-smoke-") as directory:
+    with smoke_directory() as directory:
         environment = {
             **{
                 name: value

@@ -213,6 +213,37 @@ def test_smoke_cleans_exact_child_when_home_assertion_fails(monkeypatch):
     assert_smoke_port_closed()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory sharing semantics")
+@pytest.mark.parametrize("home_fails", [False, True])
+def test_smoke_waits_for_transient_windows_directory_release(monkeypatch, home_fails):
+    module = runpy.run_path(str(SMOKE))
+    temporary_type = module["tempfile"].TemporaryDirectory
+    cleanup = temporary_type.cleanup
+    pending, directories = [], []
+
+    def briefly_busy(directory):
+        directories.append(Path(directory.name))
+        if len(pending) < 3:
+            pending.append(directory.name)
+            error = PermissionError("synthetic directory still in use")
+            error.winerror = 32
+            raise error
+        return cleanup(directory)
+
+    monkeypatch.setattr(temporary_type, "cleanup", briefly_busy)
+    if home_fails:
+        def fail_home(opener):
+            raise RuntimeError("synthetic home-check failure")
+
+        monkeypatch.setitem(module["run_smoke"].__globals__, "check_home", fail_home)
+        with pytest.raises(RuntimeError, match="synthetic home-check failure"):
+            module["run_smoke"]()
+    else:
+        module["run_smoke"]()
+    assert directories and all(not directory.exists() for directory in directories)
+    assert_smoke_port_closed()
+
+
 def test_smoke_isolates_credentials_and_inherited_worker_configuration(monkeypatch):
     assert SMOKE.is_file()
     module = runpy.run_path(str(SMOKE))
