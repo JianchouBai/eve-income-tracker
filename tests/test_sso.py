@@ -105,7 +105,7 @@ def test_authorization_url_uses_pkce_and_metadata_cache_expires_at_one_hour():
                 "response_type": ["code"],
                 "client_id": ["client-id"],
                 "redirect_uri": ["http://localhost:8000/auth/callback"],
-                "scope": [WALLET_SCOPE],
+                "scope": [WALLET_SCOPE + " esi-corporations.read_projects.v1"],
                 "state": ["state +/&?"],
                 "code_challenge": [CHALLENGE],
                 "code_challenge_method": ["S256"],

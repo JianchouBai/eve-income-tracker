@@ -14,6 +14,8 @@ from app.config import Settings
 
 DISCOVERY_URL = "https://login.eveonline.com/.well-known/oauth-authorization-server"
 WALLET_SCOPE = "esi-wallet.read_character_wallet.v1"
+PROJECTS_SCOPE = "esi-corporations.read_projects.v1"
+REQUESTED_SCOPES = (WALLET_SCOPE, PROJECTS_SCOPE)
 CACHE_LIFETIME = timedelta(hours=1)
 
 
@@ -94,7 +96,7 @@ class SsoClient:
                     "response_type": "code",
                     "client_id": self._settings.eve_client_id,
                     "redirect_uri": self._settings.eve_callback_url,
-                    "scope": WALLET_SCOPE,
+                    "scope": " ".join(REQUESTED_SCOPES),
                     "state": state,
                     "code_challenge": challenge,
                     "code_challenge_method": "S256",

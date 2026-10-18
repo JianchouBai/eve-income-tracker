@@ -684,6 +684,7 @@ def create_app(
                 identity.character_name,
                 services.cipher.encrypt(tokens.refresh_token),
                 authorized_at,
+                granted_scopes=identity.scopes,
             )
         except Exception:  # noqa: BLE001 - expose only a fixed save failure.
             logger.warning(

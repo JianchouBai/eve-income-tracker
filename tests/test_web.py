@@ -1976,3 +1976,22 @@ def test_storage_work_is_offloaded_and_serialized_without_blocking_health(
         assert first_request.result(timeout=3).status_code in (200, 202)
         assert second_request.result(timeout=3).status_code in (200, 202)
         assert second_called.is_set()
+
+
+def test_callback_stores_verified_scopes(context):
+    settings, services, clock = context
+    services.sso.identity = CharacterIdentity(
+        101,
+        "Verified Pilot",
+        ("esi-wallet.read_character_wallet.v1", "esi-corporations.read_projects.v1"),
+    )
+    with TestClient(create_app(settings, services, clock)) as client:
+        authorize(client, settings)
+        record = services.characters.list_all()[0]
+        assert set(record.granted_scopes) == {
+            "esi-wallet.read_character_wallet.v1",
+            "esi-corporations.read_projects.v1",
+        }
+        start = record.tracking_started_at
+        authorize(client, settings)
+        assert services.characters.list_all()[0].tracking_started_at == start
