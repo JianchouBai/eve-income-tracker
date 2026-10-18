@@ -69,9 +69,17 @@ def create_version_one_database(path):
         connection.close()
 
 
-def create_version_two_source(path):
+def create_version_two_source(path, *, current=False):
     database = Database(path)
-    database.initialize()
+    from app.storage import _create_version_two_schema
+
+    with database.connection() as connection:
+        _create_version_two_schema(connection)
+        connection.execute("PRAGMA user_version = 2")
+    with database.connection() as connection:
+        connection.execute(
+            "ALTER TABLE characters ADD COLUMN granted_scopes TEXT NOT NULL DEFAULT '[]'"
+        )
     groups = CharacterGroupRepository(database)
     characters = CharacterRepository(database)
     journals = JournalRepository(database)
@@ -107,6 +115,10 @@ def create_version_two_source(path):
         [entry],
         datetime(2026, 9, 4, 11, tzinfo=UTC),
     )
+    with database.connection() as connection:
+        connection.execute("ALTER TABLE characters DROP COLUMN granted_scopes")
+    if current:
+        database.initialize()
     return group, entry
 
 
@@ -133,7 +145,7 @@ def test_prepare_backs_up_v1_bytes_migrates_and_keeps_newest_three(tmp_path):
 
     expected_backup = backups / "eve_income-v1-20260930T010203000000Z.sqlite3"
     assert expected_backup.read_bytes() == original
-    assert Database(path).inspect_version() == 2
+    assert Database(path).inspect_version() == 3
     assert sorted(item.name for item in backups.iterdir()) == [
         "eve_income-v1-20260928T000000000000Z.sqlite3",
         "eve_income-v1-20260929T000000000000Z.sqlite3",
@@ -183,7 +195,7 @@ def test_prepare_rejects_corrupt_or_future_database_without_mutation_or_backup(
         with sqlite3.connect(path) as connection:
             connection.execute("CREATE TABLE sentinel (value TEXT NOT NULL)")
             connection.execute("INSERT INTO sentinel VALUES ('private-keep-me')")
-            connection.execute("PRAGMA user_version = 3")
+            connection.execute("PRAGMA user_version = 4")
     original = path.read_bytes()
     backups = tmp_path / "backups"
 
@@ -249,7 +261,7 @@ def test_prepare_creates_new_database_atomically_and_leaves_current_v2_untouched
 
     new_lifecycle.prepare()
 
-    assert Database(new_path).inspect_version() == 2
+    assert Database(new_path).inspect_version() == 3
     assert list(new_path.parent.glob("*.tmp")) == []
     current_bytes = new_path.read_bytes()
 
@@ -279,7 +291,7 @@ def test_import_v2_preserves_history_and_structure_but_requires_reauthorization(
     assert result.characters_imported == 1
     assert result.journal_entries_imported == 1
     assert source.read_bytes() == source_bytes
-    assert Database(target).inspect_version() == 2
+    assert Database(target).inspect_version() == 3
     groups = CharacterGroupRepository(Database(target)).list_all()
     assert groups == [expected_group]
     character = CharacterRepository(Database(target)).list_all()[0]
@@ -315,7 +327,7 @@ def test_import_includes_committed_wal_rows_without_mutating_live_source(tmp_pat
             ("WAL group",),
         ).fetchone()[0]
         writer.execute(
-            "INSERT INTO characters VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO characters(character_id,name,encrypted_refresh_token,enabled,authorization_required,tracking_started_at,last_synced_at,group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 9001,
                 "WAL Pilot",
@@ -352,7 +364,7 @@ def test_import_includes_committed_wal_rows_without_mutating_live_source(tmp_pat
 def test_reset_authorization_backs_up_and_preserves_history(tmp_path):
     path = tmp_path / "data" / "eve_income.sqlite3"
     path.parent.mkdir()
-    expected_group, expected_entry = create_version_two_source(path)
+    expected_group, expected_entry = create_version_two_source(path, current=True)
     original = path.read_bytes()
     lifecycle = DatabaseLifecycle(
         Database(path), tmp_path / "backups", clock=fixed_clock
@@ -378,7 +390,7 @@ def test_reset_authorization_backs_up_and_preserves_history(tmp_path):
 def test_failed_authorization_reset_restores_exact_database_bytes(tmp_path):
     path = tmp_path / "data" / "eve_income.sqlite3"
     path.parent.mkdir()
-    create_version_two_source(path)
+    create_version_two_source(path, current=True)
     connection = sqlite3.connect(path)
     try:
         connection.execute(
@@ -408,7 +420,7 @@ def test_failed_authorization_reset_restores_exact_database_bytes(tmp_path):
 def test_authorization_reset_can_be_rolled_back_after_key_failure(tmp_path):
     path = tmp_path / "data" / "eve_income.sqlite3"
     path.parent.mkdir()
-    create_version_two_source(path)
+    create_version_two_source(path, current=True)
     original = path.read_bytes()
     lifecycle = DatabaseLifecycle(
         Database(path), tmp_path / "backups", clock=fixed_clock
@@ -469,7 +481,7 @@ def test_import_refuses_invalid_missing_or_future_source_without_partial_target(
         with sqlite3.connect(source) as connection:
             connection.execute("CREATE TABLE sentinel (value TEXT NOT NULL)")
             connection.execute("INSERT INTO sentinel VALUES ('private-source')")
-            connection.execute(f"PRAGMA user_version = {3 if kind == 'future' else 2}")
+            connection.execute(f"PRAGMA user_version = {4 if kind == 'future' else 2}")
     source_bytes = source.read_bytes()
     target = tmp_path / "target" / "eve_income.sqlite3"
 

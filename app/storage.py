@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -10,7 +11,7 @@ from pathlib import Path
 from app.models import CharacterGroupRecord, CharacterRecord, JournalEntry
 
 UTC = timezone.utc  # noqa: UP017 - test runtime is Python 3.10.
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 
 class GroupNameConflictError(ValueError):
@@ -93,6 +94,13 @@ class Database:
                 _create_version_two_schema(connection)
             elif version == 1:
                 _migrate_version_one_to_two(connection)
+            if version < 3:
+                from app.lp_storage import create_lp_schema
+
+                connection.execute(
+                    "ALTER TABLE characters ADD COLUMN granted_scopes TEXT NOT NULL DEFAULT '[]'"
+                )
+                create_lp_schema(connection)
             connection.execute(f"PRAGMA user_version = {LATEST_SCHEMA_VERSION}")
 
 
@@ -154,6 +162,7 @@ def _character_from_row(row: sqlite3.Row) -> CharacterRecord:
             _parse_utc(row["last_synced_at"]) if row["last_synced_at"] else None
         ),
         group_id=row["group_id"],
+        granted_scopes=tuple(json.loads(row["granted_scopes"])),
     )
 
 
@@ -255,6 +264,8 @@ class CharacterRepository:
         name: str,
         encrypted_refresh_token: str,
         authorized_at: datetime,
+        *,
+        granted_scopes: tuple[str, ...] = (),
     ) -> CharacterRecord:
         with self.database.connection() as connection:
             connection.execute(
@@ -266,6 +277,10 @@ class CharacterRepository:
                 "encrypted_refresh_token = excluded.encrypted_refresh_token, "
                 "enabled = 1, authorization_required = 0",
                 (character_id, name, encrypted_refresh_token, _utc_iso(authorized_at)),
+            )
+            connection.execute(
+                "UPDATE characters SET granted_scopes=? WHERE character_id=?",
+                (json.dumps(sorted(set(granted_scopes))), character_id),
             )
             row = connection.execute(
                 "SELECT * FROM characters WHERE character_id = ?", (character_id,)
@@ -329,6 +344,11 @@ class CharacterRepository:
         self, character_id: int, encrypted_refresh_token: str
     ) -> None:
         self._update(character_id, "encrypted_refresh_token", encrypted_refresh_token)
+
+    def replace_granted_scopes(
+        self, character_id: int, scopes: tuple[str, ...]
+    ) -> None:
+        self._update(character_id, "granted_scopes", json.dumps(sorted(set(scopes))))
 
     def mark_authorization_required(self, character_id: int) -> None:
         self._update(character_id, "authorization_required", 1)

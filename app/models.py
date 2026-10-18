@@ -33,6 +33,7 @@ class CharacterRecord:
     tracking_started_at: datetime
     last_synced_at: datetime | None
     group_id: int | None = None
+    granted_scopes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_utc(self.tracking_started_at, "tracking_started_at")

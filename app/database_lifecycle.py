@@ -54,6 +54,22 @@ _REQUIRED_SCHEMA = {
     },
 }
 
+_REQUIRED_SCHEMA[3] = {
+    **_REQUIRED_SCHEMA[2],
+    "characters": _REQUIRED_SCHEMA[2]["characters"] | {"granted_scopes"},
+    "lp_projects": {"corporation_id", "project_id", "details", "selected_at"},
+    "lp_tracking": {"character_id", "segment_id", "contributed", "last_success_at"},
+    "lp_segments": {"segment_id", "character_id", "started_at", "ended_at"},
+    "lp_snapshots": {"snapshot_id", "contributed", "accepted", "observed_at"},
+    "lp_income_entries": {
+        "snapshot_id",
+        "previous_contributed",
+        "current_contributed",
+        "net",
+    },
+    "lp_problems": {"character_id", "code", "started_at", "irrecoverable"},
+}
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
@@ -456,7 +472,7 @@ class DatabaseLifecycle:
             )
             connection.execute(
                 "UPDATE characters SET encrypted_refresh_token = '', "
-                "authorization_required = 1"
+                "authorization_required = 1, granted_scopes = '[]'"
             )
             connection.commit()
             return character_count, journal_count

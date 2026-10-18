@@ -108,7 +108,7 @@ def test_initialize_creates_version_two_group_schema(tmp_path):
     database.initialize()
 
     with database.connection() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         tables = {
             row[0]
@@ -174,13 +174,13 @@ def test_initialize_rejects_future_schema_without_mutation(tmp_path):
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE sentinel (value TEXT NOT NULL)")
         connection.execute("INSERT INTO sentinel VALUES ('keep-me')")
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute("PRAGMA user_version = 4")
 
     with pytest.raises(RuntimeError, match="newer database schema"):
         Database(path).initialize()
 
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert (
             connection.execute("SELECT value FROM sentinel").fetchone()[0] == "keep-me"
         )
@@ -221,7 +221,7 @@ def test_initialize_is_idempotent_and_enables_foreign_keys(tmp_path):
     database.initialize()
 
     with database.connection() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
