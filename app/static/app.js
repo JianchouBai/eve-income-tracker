@@ -237,8 +237,8 @@ function lp(value, places = 2) {
   return whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fraction ? `.${fraction}` : '');
 }
 
-function lpReading(data) {
-  return data?.has_coverage ? `${lp(data.net)} LP` : '— LP';
+function lpReading(data, places = 2) {
+  return data?.has_coverage ? `${lp(data.net, places)} LP` : '— LP';
 }
 
 function lpNote(data) {
@@ -417,7 +417,7 @@ function render(data, entries, direction = 0) {
     $('summary-income').textContent = isk(data.income, 0);
     $('summary-tax').textContent = isk(data.tax, 0);
     $('summary-net').textContent = isk(data.net, 0);
-    $('summary-lp').textContent = lpReading(data.lp);
+    $('summary-lp').textContent = lpReading(data.lp, 0);
     $('lp-note').textContent = lpNote(data.lp);
     breakdown($('category-breakdown'), '类型分项', data.categories, 'category', data.lp);
     breakdown($('character-breakdown'), '角色分项', data.characters, 'name');
